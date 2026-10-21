@@ -1,0 +1,29 @@
+久留美桌宠音效 来源与许可证记录
+下载日期：2026-10-21
+所有文件均为 CC0 1.0（公共领域贡献，https://creativecommons.org/publicdomain/zero/1.0/），
+可免费用于个人和商业用途，不强制署名（下面仍列出作者，方便以后致谢）。
+mp3/ 目录下是试听用的 MP3 转码版：峰值统一到 -1 dBFS，其他未改动（未裁剪）。
+
+[A] 常态左键点击
+click_1.ogg  <- pop1.ogg（来自 3pops.zip）  作者：wubitog
+             https://opengameart.org/content/3-pop-sounds  许可证：CC0
+click_2.mp3  <- bing_01_0.mp3                作者：EZduzziteh
+             https://opengameart.org/content/boings  许可证：CC0
+click_3.mp3  <- plup.mp3                     作者：EZduzziteh
+             https://opengameart.org/content/silly-sound-effects  许可证：CC0
+
+[B] FX启动：好心情（上涨）
+good_1.wav   <- coin2.wav（来自 coin_sounds.zip）  作者：Luke.RUSTLTD
+             https://opengameart.org/content/10-8bit-coin-sounds  许可证：CC0
+good_2.ogg   <- positive_0.ogg               作者：EZduzziteh
+             https://opengameart.org/content/positive-sound  许可证：CC0
+good_3.wav   <- complete_0.wav               作者：Fupi
+             https://opengameart.org/content/cute-mission-complete  许可证：CC0
+
+[C] FX启动：坏心情（下跌）
+bad_1.ogg    <- losetrumpet_0.ogg            作者：0new4y
+             https://opengameart.org/content/game-over-trumpet-sfx  许可证：CC0
+bad_2.wav    <- death.wav（来自 vsgame_0.zip）  作者：sauer2
+             https://opengameart.org/content/oldschool-win-and-die-jump-and-run-sounds  许可证：CC0
+bad_3.ogg    <- lowDown.ogg（Digital Audio 音效包）  作者：Kenney (www.kenney.nl)
+             https://kenney.nl/assets/digital-audio  许可证：CC0（包内 License.txt）

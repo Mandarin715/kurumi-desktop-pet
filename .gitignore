@@ -1,0 +1,12 @@
+.venv/
+.uv-cache/
+__pycache__/
+build/
+dist/
+*.log
+okx.local.json*
+dist/okx.local.json*
+.env
+.env.*
+*.ini
+*.zip
