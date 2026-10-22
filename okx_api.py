@@ -1,4 +1,4 @@
-"""Read-only OKX REST integration. Four fixed GET routes; no trading SDK."""
+"""Read-only OKX REST integration. Fixed GET routes; no trading SDK."""
 import base64
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -16,8 +16,10 @@ TICKER = '/api/v5/market/ticker'
 CONFIG = '/api/v5/account/config'
 POSITIONS = '/api/v5/account/positions'
 BALANCE = '/api/v5/account/balance'
-GET_ROUTES = frozenset((TICKER, CONFIG, POSITIONS, BALANCE))
-DEFAULT_OKX = {'inst_id': 'BTC-USDT', 'simulated': False,
+INSTRUMENTS = '/api/v5/public/instruments'
+PUBLIC_ROUTES = frozenset((TICKER, INSTRUMENTS))
+GET_ROUTES = frozenset((TICKER, CONFIG, POSITIONS, BALANCE, INSTRUMENTS))
+DEFAULT_OKX = {'inst_id': 'BTC-USDT', 'inst_type': 'SPOT', 'simulated': False,
                'position_stop_loss_percent': 3., 'daily_loss_percent': 3.,
                'timeout_seconds': 5.}
 
@@ -33,6 +35,9 @@ def validate_options(data=None):
     result['inst_id'] = result['inst_id'].strip().upper()
     if len(result['inst_id']) > 64 or not re.fullmatch(r'[A-Z0-9]+(?:-[A-Z0-9]+){1,5}', result['inst_id']):
         raise ValueError('交易对格式无效，例如 BTC-USDT')
+    # Keep legacy IDs verbatim (apart from the established case normalization).
+    # The canonical ID wins over stale/absent auxiliary market metadata.
+    result['inst_type'] = 'SWAP' if result['inst_id'].endswith('-SWAP') else 'SPOT'
     if type(result['simulated']) is not bool:
         raise ValueError('模拟盘设置必须为 true 或 false')
     for key in ('position_stop_loss_percent', 'daily_loss_percent', 'timeout_seconds'):
@@ -116,9 +121,13 @@ class OKXClient:
         self.scope = None
 
     def _get(self, route, query=None, private=False, deadline=None):
-        if route not in GET_ROUTES or (route == TICKER) == private:
+        if route not in GET_ROUTES or (route in PUBLIC_ROUTES) == private:
             raise OKXError('不允许的接口')
-        if query and (route != TICKER or set(query) != {'instId'}):
+        valid_query = ((route == TICKER and isinstance(query, dict) and set(query) == {'instId'}
+                        and query['instId'] == self.options['inst_id'])
+                       or (route == INSTRUMENTS and isinstance(query, dict) and set(query) == {'instType'}
+                           and query['instType'] in ('SPOT', 'SWAP')))
+        if (query and not valid_query) or (route in PUBLIC_ROUTES and not valid_query):
             raise OKXError('不允许的参数')
         path = route + ('?' + urlencode(query) if query else '')
         headers = {'Accept': 'application/json', 'User-Agent': 'KurumiPet/1.0'}
@@ -148,8 +157,11 @@ class OKXClient:
                 with self.opener.open(request, timeout=timeout) as response:
                     if response.geturl() != ORIGIN+path:
                         raise OKXError('连接异常')
-                    raw = response.read(1024*1024+1)
-                    if len(raw) > 1024*1024:
+                    # The complete public catalog is larger than a ticker or
+                    # account response. Bound it separately without truncation.
+                    limit = (8 if route == INSTRUMENTS else 1) * 1024 * 1024
+                    raw = response.read(limit+1)
+                    if len(raw) > limit:
                         raise OKXError('响应过大')
                     payload = json.loads(raw)
             if not isinstance(payload, dict) or str(payload.get('code')) != '0' or not isinstance(payload.get('data'), list):
@@ -160,6 +172,9 @@ class OKXClient:
         except Exception:
             # Never propagate HTTP errors, response text, headers or credentials.
             raise OKXError('连接或数据读取失败') from None
+
+    def instruments(self, inst_type):
+        return self._get(INSTRUMENTS, {'instType': inst_type})
 
     def poll_ticker(self):
         data = self._get(TICKER, {'instId': self.options['inst_id']})

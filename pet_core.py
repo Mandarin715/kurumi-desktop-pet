@@ -85,7 +85,7 @@ def atomic_json(path, data):
             temporary.unlink()
 
 
-def save_options(config, external, bundled, source, okx):
+def save_options(config, external, bundled, source, okx, fx=None):
     path = config.config_path
     # Bundled one-file resources are temporary/read-only; create an external copy.
     if path not in (external / 'kurumi.json', external / 'assets' / 'kurumi.json'):
@@ -96,8 +96,17 @@ def save_options(config, external, bundled, source, okx):
         if not isinstance(data, dict) or source not in ('ocr', 'okx'):
             raise ValueError()
         options = validate_options(okx)
-        data.update({'data_source': source, 'okx': options})
+        # Merge only known edited fields, retaining future/user extension keys.
+        raw_okx = data.get('okx', {})
+        data.update({'data_source': source,
+                     'okx': {**(raw_okx if isinstance(raw_okx, dict) else {}), **options}})
+        if fx is not None:
+            policy = validated_policy(fx)
+            raw_fx = data.get('fx', {})
+            data['fx'] = {**(raw_fx if isinstance(raw_fx, dict) else {}), **policy}
         atomic_json(path, data)
     except (ValueError, OSError, TypeError):
         raise ValueError('无法保存 kurumi.json，请检查文件格式或目录写入权限') from None
     config.data_source, config.okx, config.config_path = source, options, path
+    if fx is not None:
+        config.fx = policy

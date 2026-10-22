@@ -16,10 +16,12 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBo
 
 from pet_core import atomic_json, image_candidates, load_config, save_options
 from fx_monitor import FXMonitor
+from fx_settings import SensitivityControls
 from fx_ocr import parse_price
 from fx_region import RegionSelector, resolve_region
 from pet_audio import PetAudio
 from okx_api import Credentials, load_credentials, validate_options
+from okx_instruments import InstrumentSelector
 from window_placement import place_dialog
 
 APP_NAME = '久留美桌宠'
@@ -165,7 +167,7 @@ class PetWindow(QWidget):
         self.fx.notice.connect(self.show_fx_notice)
         self.fx.needs_region.connect(self.select_fallback_region)
         self.fx.permission_warning.connect(self.show_permission_warning)
-        self.menu.addAction('FX设置…', self.fx_settings)
+        self.menu.addAction('FX设置…', lambda: self.fx_settings())
         self.selector = None
         self.menu.addSeparator()
         self.mute_action = QAction('静音', self, checkable=True)
@@ -320,7 +322,7 @@ class PetWindow(QWidget):
                                    preserve_history=was_active and data is None)
         self.selector = RegionSelector(selected)
 
-    def fx_settings(self):
+    def fx_settings(self, load_instruments=True):
         dialog = QDialog(self)
         dialog.setWindowTitle('FX设置 · 截图 / OKX')
         dialog.resize(570, min(680, QApplication.primaryScreen().availableGeometry().height()-80))
@@ -342,6 +344,8 @@ class PetWindow(QWidget):
         status_label = QLabel(region_label + '\n状态：' + self.fx.status_text)
         status_label.setWordWrap(True)
         layout.addWidget(status_label)
+        sensitivity = SensitivityControls(self.config.fx)
+        layout.addWidget(sensitivity)
         form = QFormLayout()
         stop = QLineEdit('' if self.fx.stop_loss() is None else f'{self.fx.stop_loss():.12f}'.rstrip('0').rstrip('.'))
         stop.setPlaceholderText('留空关闭止损提醒，例如 98.50')
@@ -349,12 +353,12 @@ class PetWindow(QWidget):
         layout.addLayout(form)
         layout.addWidget(QLabel('OKX 公共行情（无需密钥）'))
         okx_form = QFormLayout()
-        instrument = QLineEdit(self.config.okx['inst_id'])
-        instrument.setObjectName('okx_inst_id')
+        instrument = InstrumentSelector(self.config.okx, self.config.data_source == 'okx')
+        layout.addWidget(instrument)
         simulated = QCheckBox('模拟盘（使用对应模拟盘密钥）')
         simulated.setChecked(self.config.okx['simulated'])
-        okx_form.addRow('交易对', instrument)
         okx_form.addRow(simulated)
+        simulated.toggled.connect(instrument.set_simulated)
         position_loss, day_loss = QDoubleSpinBox(), QDoubleSpinBox()
         for spin, key in [(position_loss, 'position_stop_loss_percent'), (day_loss, 'daily_loss_percent')]:
             spin.setRange(.01, 1000.)
@@ -390,7 +394,8 @@ class PetWindow(QWidget):
                          'OKX 模式仅向欧易读取数据，绝无下单、撤单、转账或提币功能。\n'
                          '密钥只存 exe 旁 okx.local.json，不进日志、不传任何模型、不打包。\n'
                          '本地另存区域、止损、偏好、当天首尾价格和观测权益基准。\n'
-                         '涨跌阈值、保持时间和两档台词可在 kurumi.json 的 fx 中修改，重启生效。')
+                         '表情灵敏度保存后立即生效，不清空价格窗口；切换品种会重新预热。\n'
+                         '保持时间和两档台词仍可在 kurumi.json 的 fx 中修改，重启生效。')
         privacy.setWordWrap(True)
         layout.addWidget(privacy)
         reselect = QPushButton('重新框选价格区域（重置当天价格基准）')
@@ -399,6 +404,11 @@ class PetWindow(QWidget):
         buttons.button(QDialogButtonBox.StandardButton.Save).setText('保存')
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText('取消')
         outer.addWidget(buttons)
+        def set_valid(valid):
+            buttons.button(QDialogButtonBox.StandardButton.Save).setEnabled(valid)
+            reselect.setEnabled(valid)
+        sensitivity.validity_changed.connect(set_valid)
+        set_valid(sensitivity.valid)
         pending = {'reselect': False}
 
         def save(reselect_region=False):
@@ -407,7 +417,9 @@ class PetWindow(QWidget):
                 self.show_warning('请输入一个大于 0 的价格数字，或留空关闭。', dialog)
                 return
             try:
-                options = validate_options({**self.config.okx, 'inst_id': instrument.text(),
+                policy = sensitivity.policy()
+                inst_id, inst_type = instrument.selection()
+                options = validate_options({**self.config.okx, 'inst_id': inst_id, 'inst_type': inst_type,
                                             'simulated': simulated.isChecked(),
                                             'position_stop_loss_percent': position_loss.value(),
                                             'daily_loss_percent': day_loss.value()})
@@ -418,28 +430,44 @@ class PetWindow(QWidget):
                     raise ValueError('密钥格式无效')
                 changed = options != self.config.okx or credentials != existing
                 same_instrument = all(options[key] == self.config.okx[key] for key in ('inst_id', 'simulated'))
-                save_options(self.config, self.external, self.bundled, self.config.data_source, options)
+                sensitivity_changed = sensitivity.dirty
+                save_options(self.config, self.external, self.bundled, self.config.data_source, options,
+                             fx=policy if sensitivity.dirty else None)
                 credential_path = self.external / 'okx.local.json'
-                if credentials.present or credential_path.is_file():
+                if credentials != existing:
                     atomic_json(credential_path, {key: getattr(credentials, key) for key in ('api_key', 'secret_key', 'passphrase')})
-            except (ValueError, OSError):
-                self.show_warning('设置未保存：请检查交易对、完整密钥字段及目录写入权限。', dialog)
+            except ValueError as error:
+                self.show_warning('设置未保存：' + str(error), dialog)
                 return
+            except OSError:
+                self.show_warning('设置未保存：请检查本地文件的写入权限。', dialog)
+                return
+            if not same_instrument and self.config.data_source == 'okx':
+                value = None
             self.settings.setValue('fx/stop_loss', str(value) if value is not None else '')
             self.settings.sync()
-            if self.fx.engine:
+            if self.fx.engine and self.fx.engine.stop_loss != value:
                 self.fx.engine.stop_loss = float(value) if value is not None else None
                 self.fx.engine.below_stop = False
-            if changed and self.fx.active:
-                source = self.fx.source
-                self.fx.set_active(True, source_override=source, preserve_history=same_instrument)
+            # Reset a changed instrument before evaluating thresholds: returns
+            # from the previous symbol must not produce a new pose on Save.
+            self.fx.policy = self.config.fx
+            if changed:
+                self.fx.reconfigure_okx()
+            if sensitivity_changed:
+                self.fx.apply_policy(self.config.fx)
             pending['reselect'] = reselect_region
             dialog.accept()
+            if not same_instrument and self.config.data_source == 'okx':
+                QTimer.singleShot(0, lambda: self.show_warning('已切换交易品种或模拟盘状态，手填止损价已清空，请按新品种重新设置。'))
         buttons.accepted.connect(lambda: save())
         buttons.rejected.connect(dialog.reject)
         reselect.clicked.connect(lambda: save(True))
+        if load_instruments:
+            QTimer.singleShot(0, instrument.load)
         place_dialog(dialog, self)
         dialog.exec()
+        dialog.deleteLater()
         if pending['reselect']:
             active = self.fx.active
             source = self.fx.source

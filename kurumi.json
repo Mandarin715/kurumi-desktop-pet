@@ -1,6 +1,9 @@
 {
   "default": 10,
   "duration": 4000,
+  "sound": {
+    "volume": 0.6
+  },
   "lines": {
     "1": [
       "FX，简单！",
@@ -153,14 +156,13 @@
       "14": [
         "利润全融化了……我快崩溃了啦！"
       ]
-    }
-  },
-  "sound": {
-    "volume": 0.6
+    },
+    "sensitivity_preset": "default"
   },
   "data_source": "ocr",
   "okx": {
     "inst_id": "BTC-USDT",
+    "inst_type": "SPOT",
     "simulated": false,
     "position_stop_loss_percent": 3.0,
     "daily_loss_percent": 3.0,

@@ -22,6 +22,7 @@ def run(report_path, external, bundled):
     import tempfile
     original_external, original_position = pet.external, pet.pos()
     placement_checks = []
+    settings_checks = []
     area = pet.screen().availableGeometry()
     pet.move(area.center()-pet.rect().center())
     stationary = pet.pos()
@@ -33,6 +34,26 @@ def run(report_path, external, bundled):
                                          and pet.pos() == stationary
                                          and any(screen.availableGeometry().contains(dialog.frameGeometry())
                                                  for screen in QApplication.screens())))
+            from fx_settings import SensitivityControls
+            from okx_instruments import InstrumentSelector
+            from PySide6.QtWidgets import QDialogButtonBox
+            controls = dialog.findChild(SensitivityControls)
+            selector = dialog.findChild(InstrumentSelector)
+            if (controls is None or selector is None
+                    or selector.selection()[0] != pet.config.okx['inst_id']
+                    or selector.controls.isEnabled() != (pet.config.data_source == 'okx')):
+                raise RuntimeError('Packaged strategy/market widgets missing or changed existing instrument')
+            controls.preset.setCurrentIndex(controls.preset.findData('custom'))
+            controls.spins[0].setValue(1.)
+            if dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save).isEnabled():
+                raise RuntimeError('Packaged threshold validation did not block Save')
+            controls.restore_default()
+            if not controls.valid:
+                raise RuntimeError('Packaged restore sensitivity failed')
+            dialog.grab().save(str(report_path.with_name(report_path.stem+'-settings.png')))
+            settings_checks.append(True)
+        except Exception:
+            settings_checks.append(False)
         finally:
             if dialog:
                 dialog.reject()
@@ -41,7 +62,7 @@ def run(report_path, external, bundled):
         with tempfile.TemporaryDirectory(dir=report_path.parent) as empty_folder:
             pet.external = Path(empty_folder)
             QTimer.singleShot(100, inspect_settings)
-            pet.fx_settings()
+            pet.fx_settings(load_instruments=False)
         pet.show_permission_warning('测试提示：建议改成只读。')
         QApplication.processEvents()
         placement_checks.append(not pet.permission_box.frameGeometry().intersects(pet.frameGeometry()))
@@ -51,6 +72,8 @@ def run(report_path, external, bundled):
         pet.move(original_position)
     if placement_checks != [True, True]:
         raise RuntimeError('Native dialog placement overlaps the pet or work area')
+    if settings_checks != [True]:
+        raise RuntimeError('Packaged settings controls failed validation')
     if not QFontMetrics(pet.font).inFontUcs4(ord('久')):
         raise RuntimeError('Chinese font unavailable')
     for _ in range(50):
@@ -143,6 +166,25 @@ def run(report_path, external, bundled):
         'code': '0', 'data': [{'instId': 'BTC-USDT', 'last': '123.45', 'ts': str(int(time.time()*1000))}]})
     if client.poll().price != 123.45:
         raise RuntimeError('Packaged OKX public fixture failed')
+    from okx_instruments import available_instruments, normalize_instrument
+    client.transport = lambda *args: {'code': '0', 'data': [
+        {'instId': 'BTC-USDT-SWAP', 'instType': 'SWAP', 'state': 'live'}]}
+    if (available_instruments(client.instruments('SWAP'), 'SWAP') != ['BTC-USDT-SWAP']
+            or normalize_instrument('btc-usdt-swap', 'SWAP') != 'BTC-USDT-SWAP'):
+        raise RuntimeError('Packaged instrument catalog failed')
+    client.transport = lambda *args: {
+        'code': '0', 'data': [{'instId': 'BTC-USDT', 'last': '123.45', 'ts': str(int(time.time()*1000))}]}
+    from fx_logic import sensitivity_values
+    strategy = PriceMoodEngine(pet.config.fx)
+    for tick in range(0, 31, 2):
+        strategy.receive(100., tick)
+    strategy.receive(100.1, 32.)
+    previous_rows = list(strategy.history)
+    strategy.apply_policy({**strategy.policy, **sensitivity_values(.05, .2, 2.)}, 32.)
+    if (list(strategy.history) != previous_rows or strategy.pending_count != 0
+            or strategy.receive(100.1, 34.).mood != 'flat'
+            or strategy.receive(100.1, 36.).mood != 'up'):
+        raise RuntimeError('Packaged sensitivity update reused confirmations or cleared quotes')
     # Exercise the real background job, fallback and automatic recovery using
     # only the fixture client. Never activate credential loading or real capture.
     monitor = pet.fx
@@ -242,6 +284,8 @@ def run(report_path, external, bundled):
               'fx_synthetic_mood': update.mood,
               'sound_lengths_ms': sound_lengths, 'volume': pet.config.volume,
               'okx_public_fixture': True,
+              'sensitivity_hot_update': True, 'sensitivity_fresh_confirmations': True,
+              'instrument_catalog_fixture': True, 'ocr_instrument_selector_disabled': True,
               'okx_failure_limit': 3, 'okx_auto_recovery': True,
               'cross_source_history_cleared': True, 'ocr_day_baseline_reset': True,
               'fx_capture_flags': capture_flags, 'fx_debug_logging': True,

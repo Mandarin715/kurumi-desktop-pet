@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from okx_api import (BALANCE, CONFIG, DEFAULT_OKX, GET_ROUTES, POSITIONS, TICKER,
+from okx_api import (BALANCE, CONFIG, DEFAULT_OKX, GET_ROUTES, INSTRUMENTS, POSITIONS, TICKER,
                      Credentials, NoRedirect, OKXClient, OKXError, load_credentials, validate_options)
 from okx_risk import EquityTracker
 from fx_logic import PriceMoodEngine, validated_policy
@@ -139,7 +139,7 @@ class APITests(unittest.TestCase):
 
     def test_fixed_route_allowlist_blocks_all_write_routes(self):
         client = self.client()
-        self.assertEqual(GET_ROUTES, {TICKER, CONFIG, POSITIONS, BALANCE})
+        self.assertEqual(GET_ROUTES, {TICKER, CONFIG, POSITIONS, BALANCE, INSTRUMENTS})
         for route in ('/api/v5/trade/order', '/api/v5/trade/cancel-order', '/api/v5/asset/withdrawal',
                       'https://example.invalid', '/api/v5/account/config?foo=1'):
             with self.assertRaises(OKXError):

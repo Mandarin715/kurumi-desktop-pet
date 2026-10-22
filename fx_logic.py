@@ -32,11 +32,41 @@ DEFAULT_FX = {
 LABELS = {'up_strong': '大涨', 'up': '上涨', 'flat': '横盘', 'sleep': '横盘犯困',
           'down': '下跌', 'down_strong': '大跌', 'panic': '慌张', 'waiting': '等待窗口数据'}
 
+SENSITIVITY_PRESETS = {
+    'forex_stock': ('外汇股票', .05, .20, 2.),
+    'default': ('默认', .08, .30, 3.),
+    'crypto': ('加密货币', .15, .60, 5.),
+}
+SENSITIVITY_KEYS = ('flat_percent', 'strong_percent', 'panic_drop_percent',
+                    'flat_exit_percent', 'strong_exit_percent')
+
+
+def sensitivity_values(flat, strong, panic):
+    values = (flat, strong, panic)
+    if any(type(n) not in (int, float) or not math.isfinite(n) or n <= 0 for n in values):
+        raise ValueError('三个阈值必须是大于 0 的有限数字')
+    if not flat < strong < panic:
+        raise ValueError('阈值必须满足：横盘 < 强波动 < 恐慌跌幅')
+    strong_exit = strong * (2 / 3)
+    if strong_exit <= flat:
+        strong_exit = (flat + strong) / 2
+    return dict(zip(SENSITIVITY_KEYS, (flat, strong, panic, flat / 2, strong_exit)))
+
+
+def sensitivity_name(policy):
+    # Numeric settings remain authoritative when a user edits JSON by hand.
+    for name, (_, flat, strong, panic) in SENSITIVITY_PRESETS.items():
+        expected = sensitivity_values(flat, strong, panic)
+        if all(math.isclose(policy[key], value, rel_tol=1e-9, abs_tol=1e-12)
+               for key, value in expected.items()):
+            return name
+    return 'custom'
+
 
 def validated_policy(data=None):
     result = deepcopy(DEFAULT_FX)
     if data is None:
-        return result
+        data = {}
     if not isinstance(data, dict):
         raise ValueError('fx 必须是对象')
     for key in DEFAULT_FX:
@@ -82,6 +112,7 @@ def validated_policy(data=None):
         lines = result['lines_intense'][str(n)]
         if not isinstance(lines, list) or not lines or any(not isinstance(s, str) or not s.strip() for s in lines):
             raise ValueError('高情绪台词必须为非空字符串数组')
+    result['sensitivity_preset'] = sensitivity_name(result)
     return result
 
 
@@ -117,6 +148,23 @@ class PriceMoodEngine:
         self.account_risk = None
         self.account_notice = None
         self.risk_pending = False
+
+    def apply_policy(self, policy, now):
+        """Reconfigure without replaying samples or reusing old confirmations."""
+        self.policy = validated_policy(policy)
+        self.pending_mood, self.pending_count = None, 0
+        # Cached returns describe real samples; do not append/replay the last
+        # quote to manufacture a confirmation when the user presses Save.
+        panic = any(value is not None and value < -self.policy['panic_drop_percent']
+                    for value in (self.percent, self.long_percent))
+        if panic or self.below_stop or self.account_risk:
+            urgent = self.mood != 'panic'
+            self.mood = 'panic'
+            return self.advance(now, urgent=urgent)
+        candidate = self.classify()
+        if candidate not in ('flat', 'sleep'):
+            self.flat_since = None
+        return self.result()
 
     def set_account_risk(self, kind, text=None):
         if kind and kind != self.account_risk:

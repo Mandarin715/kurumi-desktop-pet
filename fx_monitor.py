@@ -114,6 +114,30 @@ class FXMonitor(QObject):
         self.status_text = text
         self.status.emit(text)
 
+    def apply_policy(self, policy):
+        """Only the strategy changes; timer, source and quote scope stay intact."""
+        self.policy = policy
+        if self.engine:
+            engine_policy = dict(policy, interval_ms=self.sampling_interval())
+            update = self.engine.apply_policy(engine_policy, time.monotonic())
+            if self.active:
+                self.publish(update)
+
+    def reconfigure_okx(self):
+        if not self.active:
+            return
+        if self.source == 'okx':
+            # set_active checks the canonical scope, even when preserve_history
+            # is requested. A changed symbol resets quotes but keeps session time.
+            self.set_active(True, source_override='okx', preserve_history=True)
+        else:
+            # Editing a fallback's API settings must never reset its OCR prices.
+            self.generation += 1
+            self.client = self.account_client = None
+            self.okx_failures = 0
+            if self.preferred_source == 'okx':
+                self.okx_retry_at = time.monotonic()
+
     def stop_loss(self):
         value = self.pet.settings.value('fx/stop_loss', self.policy['stop_loss'])
         try:
