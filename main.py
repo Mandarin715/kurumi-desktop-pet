@@ -16,13 +16,14 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBo
 
 from pet_core import atomic_json, image_candidates, load_config, save_options
 from fx_monitor import FXMonitor
-from fx_settings import NoWheelDoubleSpinBox, SensitivityControls
+from fx_settings import NoWheelDoubleSpinBox, SensitivityControls, VolumeControls
 from fx_ocr import parse_price
 from fx_region import RegionSelector, resolve_region
 from pet_audio import PetAudio
 from okx_api import DEFAULT_OKX, Credentials, load_credentials, validate_options
 from okx_instruments import InstrumentSelector
 from window_placement import place_dialog
+from app_version import VERSION
 
 APP_NAME = '久留美桌宠'
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
@@ -348,6 +349,10 @@ class PetWindow(QWidget):
         layout.addWidget(status_label)
         sensitivity = SensitivityControls(self.config.fx)
         layout.addWidget(sensitivity)
+        original_volume = self.audio.volume
+        volume = VolumeControls(original_volume, self.audio.muted)
+        volume.changed.connect(self.audio.set_volume)
+        layout.addWidget(volume)
         form = QFormLayout()
         stop = QLineEdit('' if self.fx.stop_loss() is None else f'{self.fx.stop_loss():.12f}'.rstrip('0').rstrip('.'))
         stop.setObjectName('fx_stop_loss')
@@ -404,10 +409,11 @@ class PetWindow(QWidget):
         layout.addWidget(privacy)
         restore_values = QPushButton('恢复数值默认')
         restore_values.setObjectName('fx_restore_numeric_defaults')
-        restore_values.setToolTip('恢复默认灵敏度、两条 3% 账户提醒线，并清空手填止损价；保存后生效。交易对和密钥不变。')
+        restore_values.setToolTip('恢复默认灵敏度、30% 音量、两条 3% 账户提醒线，并清空手填止损价；保存后保留。交易对和密钥不变。')
 
         def reset_numeric_values():
             sensitivity.restore_default()
+            volume.restore_default()
             position_loss.setValue(DEFAULT_OKX['position_stop_loss_percent'])
             day_loss.setValue(DEFAULT_OKX['daily_loss_percent'])
             stop.clear()
@@ -443,7 +449,8 @@ class PetWindow(QWidget):
                 same_instrument = all(options[key] == self.config.okx[key] for key in ('inst_id', 'simulated'))
                 sensitivity_changed = sensitivity.dirty
                 save_options(self.config, self.external, self.bundled, self.config.data_source, options,
-                             fx=policy if sensitivity.dirty else None)
+                             fx=policy if sensitivity.dirty else None,
+                             volume=volume.slider.value()/100 if volume.dirty else None)
                 credential_path = self.external / 'okx.local.json'
                 if credentials != existing:
                     atomic_json(credential_path, {key: getattr(credentials, key) for key in ('api_key', 'secret_key', 'passphrase')})
@@ -475,7 +482,8 @@ class PetWindow(QWidget):
         if load_instruments:
             QTimer.singleShot(0, instrument.load)
         place_dialog(dialog, self)
-        dialog.exec()
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            self.audio.set_volume(original_volume)
         dialog.deleteLater()
 
     def update_fx_status(self, status):
@@ -753,6 +761,9 @@ class PetWindow(QWidget):
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == '--apply-update':
+        from updater import run_installer
+        return run_installer(sys.argv[2])
     if len(sys.argv) == 3 and sys.argv[1] == '--self-test':
         # Use the native Windows font engine for Chinese glyph verification.
         os.environ['QT_QPA_PLATFORM'] = 'windows' if sys.platform == 'win32' else 'offscreen'
@@ -772,6 +783,7 @@ def main():
             return 0
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(VERSION)
     app.setQuitOnLastWindowClosed(False)
     log_dir = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'KurumiPet'
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -784,6 +796,14 @@ def main():
         QMessageBox.critical(None, APP_NAME, f'桌宠启动失败：\n{error}')
         return 1
     pet.show()
+    if len(sys.argv) == 3 and sys.argv[1] == '--update-receipt':
+        from updater import write_start_receipt
+        QTimer.singleShot(0, lambda: write_start_receipt(sys.argv[2]))
+    # Source runs and --self-test never check the network or offer installs.
+    if getattr(sys, 'frozen', False):
+        from update_ui import UpdateController
+        pet.updates = UpdateController(pet)
+        QTimer.singleShot(3000, pet.updates.check)
     return app.exec()
 
 

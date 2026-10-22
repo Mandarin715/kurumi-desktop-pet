@@ -1,11 +1,57 @@
 """Sensitivity editor. No persistence or market access until the user saves."""
 from copy import deepcopy
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout,
-                              QLabel, QPushButton, QVBoxLayout, QWidget)
+                              QLabel, QPushButton, QSlider, QVBoxLayout, QWidget)
 
 from fx_logic import SENSITIVITY_PRESETS, sensitivity_name, sensitivity_values, validated_policy
+from pet_audio import DEFAULT_VOLUME
+
+
+class NoWheelSlider(QSlider):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class VolumeControls(QWidget):
+    changed = Signal(float)
+
+    def __init__(self, volume, muted=False, parent=None):
+        super().__init__(parent)
+        self.dirty = False
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        row = QHBoxLayout()
+        row.addWidget(QLabel('音效音量'))
+        self.slider = NoWheelSlider(Qt.Orientation.Horizontal)
+        self.slider.setObjectName('sound_volume')
+        self.slider.setRange(0, 100)
+        self.slider.setValue(round(volume*100))
+        self.slider.setAccessibleName('音效音量百分比')
+        row.addWidget(self.slider, 1)
+        self.value_label = QLabel(f'{self.slider.value()}%')
+        self.value_label.setObjectName('sound_volume_percent')
+        self.value_label.setMinimumWidth(40)
+        row.addWidget(self.value_label)
+        layout.addLayout(row)
+        hint = QLabel(('当前已静音；' if muted else '')+'拖动立即生效，保存后保留，取消则还原。静音仍在右键菜单。')
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.slider.valueChanged.connect(self._changed)
+
+    def _changed(self, value):
+        self.dirty = True
+        self.value_label.setText(f'{value}%')
+        self.changed.emit(value/100)
+
+    def restore_default(self):
+        # A value already rounded to 30% may originate from a more precise
+        # legacy value; an explicit restore still selects exactly the default.
+        if self.slider.value() == round(DEFAULT_VOLUME*100):
+            self._changed(self.slider.value())
+        else:
+            self.slider.setValue(round(DEFAULT_VOLUME*100))
 
 
 class NoWheelDoubleSpinBox(QDoubleSpinBox):

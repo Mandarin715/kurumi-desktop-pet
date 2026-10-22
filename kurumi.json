@@ -1,9 +1,6 @@
 {
   "default": 10,
   "duration": 4000,
-  "sound": {
-    "volume": 0.6
-  },
   "lines": {
     "1": [
       "FX，简单！",
@@ -160,6 +157,9 @@
     "sensitivity_preset": "default"
   },
   "data_source": "ocr",
+  "sound": {
+    "volume": 0.3
+  },
   "okx": {
     "inst_id": "BTC-USDT",
     "inst_type": "SPOT",

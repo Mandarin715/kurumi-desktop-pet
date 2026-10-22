@@ -9,7 +9,8 @@ import time
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from pet_audio import AsyncMP3Player, PetAudio, SOUND_GROUPS, SOUND_NAMES, WindowsMP3Player, sound_candidates
+from pet_audio import (DEFAULT_VOLUME, AsyncMP3Player, PetAudio, SOUND_GROUPS, SOUND_NAMES,
+                       WindowsMP3Player, sound_candidates)
 from pet_core import load_config
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +57,75 @@ class AudioTests(unittest.TestCase):
         self.assertFalse(self.audio.play('bad'))
         self.player.play.assert_not_called()
 
+    def test_live_volume_updates_backend_and_preserves_mute(self):
+        self.audio.set_muted(True)
+        self.audio.set_volume(.2)
+        self.assertTrue(self.audio.muted)
+        self.player.set_volume.assert_called_with(.2)
+        self.assertFalse(self.audio.play('good'))
+        self.audio.set_muted(False)
+        self.assertTrue(self.audio.play('good'))
+        self.assertEqual(self.player.play.call_args.args[1], .2)
+        for value in (-1, 2, True, float('nan'), 'loud'):
+            with self.assertRaises(ValueError):
+                self.audio.set_volume(value)
+        self.assertEqual(self.audio.volume, .2)
+
+    def test_background_volume_changes_current_clip_without_restarting(self):
+        playing, changed, stopped = threading.Event(), threading.Event(), threading.Event()
+        commands, volumes = [], []
+        class Player:
+            alias = 'fake'
+            def open(self, path): return True
+            def command(self, command):
+                commands.append(command)
+                if command.startswith('play'): playing.set()
+                if command.startswith('stop'): stopped.set()
+                return True, ''
+            def set_volume(self, volume): volumes.append(volume); changed.set()
+            def close(self): pass
+        player = AsyncMP3Player(Player)
+        try:
+            player.enqueue([ROOT/'assets'/'sfx'/'good_1.mp3'], .6)
+            self.assertTrue(playing.wait(2))
+            player.set_volume(.15)
+            self.assertTrue(changed.wait(2))
+            self.assertEqual(volumes[-1], .15)
+            self.assertEqual(len([c for c in commands if c.startswith('play')]), 1)
+            self.assertFalse(any(c.startswith('stop') for c in commands))
+            player.close()
+            self.assertTrue(stopped.wait(2))
+            player.set_volume(.4)
+        finally:
+            player.shutdown()
+            player.thread.join(3)
+        self.assertEqual(len([c for c in commands if c.startswith('play')]), 1)
+
+    def test_volume_change_while_decoder_opens_uses_latest_value(self):
+        opening, release, playing = threading.Event(), threading.Event(), threading.Event()
+        commands = []
+        class Player:
+            alias = 'fake'
+            def open(self, path): opening.set(); release.wait(3); return True
+            def command(self, command):
+                commands.append(command)
+                if command.startswith('play'): playing.set()
+                return True, ''
+            def set_volume(self, volume): pass
+            def close(self): pass
+        player = AsyncMP3Player(Player)
+        try:
+            player.enqueue([ROOT/'assets'/'sfx'/'bad_1.mp3'], .6)
+            self.assertTrue(opening.wait(2))
+            player.set_volume(.1)
+            release.set()
+            self.assertTrue(playing.wait(2))
+            self.assertIn('setaudio fake volume to 100', commands)
+            self.assertNotIn('setaudio fake volume to 600', commands)
+        finally:
+            release.set()
+            player.shutdown()
+            player.thread.join(3)
     def test_background_decoder_never_blocks_or_replays_stale_clicks(self):
         opening, release, played = threading.Event(), threading.Event(), threading.Event()
         played_paths = []
@@ -139,14 +209,19 @@ class AudioTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=ROOT/'build') as name:
             external = Path(name)
             data = json.loads((ROOT/'kurumi.json').read_text(encoding='utf-8'))
-            for value, expected in [(0, 0.), (.25, .25), (1, 1.), (-1, .6),
-                                    (2, .6), ('loud', .6), (True, .6), (None, .6)]:
+            for value, expected in [(0, 0.), (.25, .25), (.6, .6), (1, 1.), (-1, DEFAULT_VOLUME),
+                                    (2, DEFAULT_VOLUME), ('loud', DEFAULT_VOLUME),
+                                    (True, DEFAULT_VOLUME), (None, DEFAULT_VOLUME)]:
                 data['sound'] = {'volume': value}
                 (external/'kurumi.json').write_text(json.dumps(data), encoding='utf-8')
                 self.assertEqual(load_config(external, ROOT).volume, expected)
             del data['sound']
             (external/'kurumi.json').write_text(json.dumps(data), encoding='utf-8')
-            self.assertEqual(load_config(external, ROOT).volume, .6)
+            self.assertEqual(load_config(external, ROOT).volume, DEFAULT_VOLUME)
+            self.assertEqual(DEFAULT_VOLUME, .3)
+            data['sound'] = {'custom_sound_option': 'keep'}
+            (external/'kurumi.json').write_text(json.dumps(data), encoding='utf-8')
+            self.assertEqual(load_config(external, ROOT).volume, DEFAULT_VOLUME)
 
     @unittest.skipUnless(sys.platform == 'win32', 'Windows native MP3 backend')
     def test_native_mp3_decode_and_silent_play(self):

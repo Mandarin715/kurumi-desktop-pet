@@ -29,14 +29,21 @@ foreach ($clip in @('click_1', 'good_1', 'good_2', 'bad_1', 'bad_2', 'bad_3')) {
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'LICENSES.txt') -Destination $out -Force
 # Preserve settings edited next to an existing release.
 if (-not (Test-Path -LiteralPath (Join-Path $out 'kurumi.json'))) {
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'kurumi.json') -Destination $out
+    # Kurumi.spec generates fresh public defaults (including 30% volume),
+    # independently of existing development/user configuration.
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'build\bundled-defaults\kurumi.json') -Destination $out
 }
 Copy-Item -Path (Join-Path $PSScriptRoot 'assets\kurumi_*.png') -Destination (Join-Path $out 'assets') -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot '使用说明.txt') -Destination $out -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination $out -Force
 if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'docs')) {
     Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'docs') -Filter '*.docx' -File | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination $out -Force
+        # A tutorial already placed in dist may be newer than the source copy.
+        if (-not (Test-Path -LiteralPath (Join-Path $out $_.Name))) {
+            Copy-Item -LiteralPath $_.FullName -Destination $out
+        }
     }
 }
+& $python release_package.py
+if ($LASTEXITCODE -ne 0) { throw 'Release archive/checksum creation failed.' }
 Write-Host 'Built: dist\Kurumi.exe'

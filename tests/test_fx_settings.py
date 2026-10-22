@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -16,10 +17,10 @@ sys.path.insert(0, str(ROOT))
 from PySide6.QtCore import QLocale, QObject, QPoint, QPointF, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QComboBox, QDialogButtonBox, QDoubleSpinBox, QLineEdit, QPushButton
+from PySide6.QtWidgets import QApplication, QComboBox, QDialogButtonBox, QDoubleSpinBox, QLineEdit, QPushButton, QSlider
 from fx_logic import (PriceMoodEngine, SENSITIVITY_PRESETS, sensitivity_name,
                       sensitivity_values, validated_policy)
-from fx_settings import SensitivityControls
+from fx_settings import SensitivityControls, VolumeControls
 from main import PetWindow
 from okx_api import (DEFAULT_OKX, INSTRUMENTS, Credentials, OKXClient, OKXError,
                      Snapshot, validate_options)
@@ -111,11 +112,33 @@ class InstrumentTests(unittest.TestCase):
                 normalize_instrument(value, kind)
 
     def test_old_market_type_is_inferred_from_id(self):
-        for value, kind in [('IRYS-USDT-SWAP', 'SWAP'), ('ETH-USDT', 'SPOT')]:
+        for value, kind in [('IRYS-USDT-SWAP', 'SWAP'), ('ETH-USDT', 'SPOT'),
+                            ('IRYS-USD_UM_XPERP-310530', 'FUTURES')]:
             options = validate_options({'inst_id': value})
             self.assertEqual(options['inst_id'], value)
             self.assertEqual(options['inst_type'], kind)
         self.assertEqual(validate_options({'inst_id': 'IRYS-USDT-SWAP', 'inst_type': 'SPOT'})['inst_type'], 'SWAP')
+        self.assertEqual(validate_options({'inst_id': 'IRYS-USD_UM_XPERP-310530', 'inst_type': 'SPOT'})['inst_type'], 'FUTURES')
+
+    def test_xperp_requires_complete_id_and_preserves_expiry(self):
+        self.assertEqual(normalize_instrument(' irys-usd_um_xperp-310530 ', 'FUTURES'),
+                         'IRYS-USD_UM_XPERP-310530')
+        for value in ('IRYS-USD_UM_XPERP', 'BTC-USD-261225', 'BTC-USD-261225-100000-C',
+                      'IRYS-USD_UM_XPERP-31053', 'IRYS-USD_UM_XPERP-310530-SWAP'):
+            with self.assertRaises(ValueError):
+                normalize_instrument(value, 'FUTURES')
+
+    def test_futures_catalog_contains_only_live_xperp(self):
+        rows = [{'instId': value, 'instType': kind, 'state': state} for value, kind, state in [
+            ('IRYS-USD_UM_XPERP-310530', 'FUTURES', 'live'),
+            ('BTC-USD_UM_XPERP-310530', 'FUTURES', 'live'),
+            ('BTC-USD-261225', 'FUTURES', 'live'),
+            ('BTC-USD-261225-100000-C', 'OPTION', 'live'),
+            ('ETH-USD_UM_XPERP-310530', 'FUTURES', 'suspend'),
+            ('BAD_UM_XPERP', 'FUTURES', 'live'),
+            ('SOL-USD_UM_XPERP-310530', 'SWAP', 'live')]]
+        self.assertEqual(available_instruments(rows * 2, 'FUTURES'),
+                         ['BTC-USD_UM_XPERP-310530', 'IRYS-USD_UM_XPERP-310530'])
 
     def test_catalog_filters_malformed_inactive_and_wrong_market(self):
         rows = [{'instId': 'BTC-USDT', 'instType': 'SPOT', 'state': 'live'},
@@ -134,11 +157,41 @@ class InstrumentTests(unittest.TestCase):
         self.assertEqual(client.instruments('SWAP'), [])
         self.assertEqual(calls[0][0], INSTRUMENTS + '?instType=SWAP')
         self.assertFalse(any('ACCESS' in key for key in calls[0][1]))
-        for private, query in [(True, {'instType': 'SPOT'}), (False, {'instType': 'FUTURES'}),
+        for private, query in [(True, {'instType': 'SPOT'}), (False, {'instType': 'OPTION'}),
                                (False, {'instType': 'SPOT', 'instId': 'BTC-USDT'}), (False, None)]:
             with self.assertRaises(OKXError):
                 client._get(INSTRUMENTS, query, private=private)
         self.assertEqual(len(calls), 1)
+
+    def test_xperp_catalog_and_ticker_are_unsigned_and_keep_full_id(self):
+        from okx_api import TICKER
+        calls = []
+        symbol = 'IRYS-USD_UM_XPERP-310530'
+        def transport(path, headers, timeout):
+            calls.append((path, headers))
+            return {'code': '0', 'data': [{'instId': symbol, 'last': '1.23',
+                                         'ts': str(int(time.time()*1000))}]}
+        client = OKXClient({'inst_id': symbol, 'simulated': True},
+                           Credentials('fake-key', 'fake-secret', 'fake-pass'), transport)
+        client.instruments('FUTURES')
+        self.assertEqual(client.poll_ticker().price, 1.23)
+        self.assertEqual([path for path, _ in calls], [INSTRUMENTS+'?instType=FUTURES',
+                                                     TICKER+'?instId='+symbol])
+        for _, headers in calls:
+            self.assertFalse(any('ACCESS' in key for key in headers))
+            self.assertEqual(headers['x-simulated-trading'], '1')
+
+    def test_xperp_worker_requests_futures_and_filters_delivery(self):
+        job = CatalogJob('FUTURES', False)
+        results = []
+        job.signals.done.connect(lambda *args: results.append(args))
+        with patch('okx_instruments.OKXClient') as client:
+            client.return_value.instruments.return_value = [
+                {'instId': symbol, 'instType': 'FUTURES', 'state': 'live'}
+                for symbol in ('IRYS-USD_UM_XPERP-310530', 'BTC-USD-261225')]
+            job.run()
+            client.return_value.instruments.assert_called_once_with('FUTURES')
+        self.assertEqual(results, [('FUTURES', False, ['IRYS-USD_UM_XPERP-310530'])])
 
     def test_catalog_worker_uses_public_client_and_sanitizes_failure(self):
         for failed in (False, True):
@@ -248,6 +301,38 @@ class WidgetTests(unittest.TestCase):
         widget.set_simulated(True)
         widget._loaded('SPOT', False, ['OLD-USDT'], False)
         self.assertEqual(widget.instrument.currentText(), 'eth-usdt')
+        widget.deleteLater()
+
+    def test_xperp_selection_load_search_and_manual_fallback(self):
+        catalog = FakeCatalog()
+        symbol = 'IRYS-USD_UM_XPERP-310530'
+        widget = InstrumentSelector(validate_options({'inst_id': symbol}), True, catalog=catalog)
+        self.assertEqual([widget.market.itemText(i) for i in range(widget.market.count())],
+                         ['现货', '永续', 'XPERP'])
+        self.assertEqual(widget.market.currentData(), 'FUTURES')
+        self.assertEqual(widget.selection(), (symbol, 'FUTURES'))
+        widget.load()
+        self.assertEqual(catalog.calls[-1], ('FUTURES', False, False))
+        widget._loaded('FUTURES', False, [symbol, 'BTC-USD_UM_XPERP-310530'], False)
+        widget.instrument.completer().setCompletionPrefix('irys')
+        self.assertEqual(widget.instrument.completer().completionCount(), 1)
+        widget._loaded('SPOT', False, ['WRONG-USDT'], False)
+        self.assertEqual(widget.instrument.count(), 2)
+        widget._loaded('FUTURES', False, [], True)
+        widget.instrument.setEditText(' btc-usd_um_xperp-310530 ')
+        self.assertEqual(widget.selection(), ('BTC-USD_UM_XPERP-310530', 'FUTURES'))
+        self.assertIn('失败', widget.status.text())
+        widget.deleteLater()
+
+    def test_ocr_keeps_xperp_config_and_does_not_fetch(self):
+        catalog = FakeCatalog()
+        symbol = 'IRYS-USD_UM_XPERP-310530'
+        widget = InstrumentSelector(validate_options({'inst_id': symbol}), False, catalog=catalog)
+        widget.instrument.setEditText('BTC-USDT')
+        widget.load(True)
+        self.assertFalse(widget.controls.isEnabled())
+        self.assertEqual(widget.selection(), (symbol, 'FUTURES'))
+        self.assertEqual(catalog.calls, [])
         widget.deleteLater()
 
     def test_cached_catalog_requests_are_coalesced_and_failure_keeps_cache(self):
@@ -388,6 +473,84 @@ class SettingsIntegrationTests(unittest.TestCase):
         self.assertEqual(saved['okx']['inst_id'], 'IRYS-USDT-SWAP')
         self.assertEqual(self.key_path.read_bytes(), self.key_bytes)
 
+    def test_volume_slider_immediate_save_reload_and_does_not_reset_fx_window(self):
+        path = self.folder/'kurumi.json'
+        data = json.loads(path.read_text(encoding='utf-8'))
+        data['sound'] = {'volume': .6, 'custom_sound_option': 'keep'}
+        path.write_text(json.dumps(data), encoding='utf-8')
+        before = path.read_bytes()
+        monitor = self.start_fake_monitor()
+        engine, rows, generation = monitor.engine, list(monitor.engine.history), monitor.generation
+        pending = monitor.engine.pending_count
+        def edit(dialog):
+            volume = dialog.findChild(VolumeControls)
+            volume.slider.setValue(22)
+            self.assertEqual(self.pet.audio.volume, .22)
+            self.assertEqual(volume.value_label.text(), '22%')
+            self.assertEqual(path.read_bytes(), before)
+            self.assertTrue(self.pet.audio.muted)
+            dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save).click()
+        self.open_settings(edit)
+        self.assertEqual(self.warnings, [])
+        self.assertEqual(self.pet.config.volume, .22)
+        self.assertEqual(load_config(self.folder, ROOT).volume, .22)
+        self.assertEqual(json.loads(path.read_text(encoding='utf-8'))['sound'], {'volume': .22, 'custom_sound_option': 'keep'})
+        self.assertTrue(self.pet.audio.muted)
+        self.assertIs(monitor.engine, engine)
+        self.assertEqual((list(engine.history), monitor.generation, engine.pending_count), (rows, generation, pending))
+        self.assertEqual(self.pet.config.okx['inst_id'], 'IRYS-USDT-SWAP')
+        self.assertEqual(self.key_path.read_bytes(), self.key_bytes)
+
+    def test_volume_slider_cancel_restores_live_volume_and_config_bytes(self):
+        path = self.folder/'kurumi.json'
+        before = path.read_bytes()
+        original = self.pet.audio.volume
+        def edit(dialog):
+            dialog.findChild(QSlider, 'sound_volume').setValue(0)
+            self.assertEqual(self.pet.audio.volume, 0.)
+            self.assertTrue(self.pet.audio.muted)
+            dialog.reject()
+        self.open_settings(edit)
+        self.assertEqual(self.pet.audio.volume, original)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(self.key_path.read_bytes(), self.key_bytes)
+
+    def test_untouched_volume_keeps_legacy_precision_and_missing_option(self):
+        path = self.folder/'kurumi.json'
+        for sound, expected in [({'volume': .3555, 'custom': 'keep'}, .3555), (None, .3)]:
+            data = json.loads(path.read_text(encoding='utf-8'))
+            if sound is None:
+                data.pop('sound', None)
+            else:
+                data['sound'] = sound
+            path.write_text(json.dumps(data), encoding='utf-8')
+            self.pet.config = load_config(self.folder, ROOT)
+            self.pet.audio.set_volume(self.pet.config.volume)
+            def edit(dialog):
+                volume = dialog.findChild(VolumeControls)
+                self.assertFalse(volume.dirty)
+                self.assertEqual(volume.slider.value(), round(expected*100))
+                dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save).click()
+            self.open_settings(edit)
+            self.assertEqual(self.pet.audio.volume, expected)
+            self.assertEqual(json.loads(path.read_text(encoding='utf-8')).get('sound'), sound)
+
+    def test_volume_slider_ignores_mouse_wheel(self):
+        def edit(dialog):
+            slider = dialog.findChild(QSlider, 'sound_volume')
+            for focused in (False, True):
+                slider.setFocus() if focused else slider.clearFocus()
+                before = slider.value()
+                event = QWheelEvent(QPointF(5, 5), QPointF(slider.mapToGlobal(QPoint(5, 5))), QPoint(),
+                                    QPoint(0, 120), Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                                    Qt.ScrollPhase.NoScrollPhase, False)
+                self.app.sendEvent(slider, event)
+                self.assertEqual(slider.value(), before)
+            QTest.keyClick(slider, Qt.Key.Key_Left)
+            self.assertLess(slider.value(), before)
+            dialog.reject()
+        self.open_settings(edit)
+
     def test_all_numeric_editors_ignore_wheel_even_with_focus_and_allow_keyboard(self):
         def edit(dialog):
             controls = dialog.findChild(SensitivityControls)
@@ -431,6 +594,8 @@ class SettingsIntegrationTests(unittest.TestCase):
             self.assertEqual(dialog.findChild(QComboBox, 'okx_inst_id').currentText(), 'IRYS-USDT')
             self.assertEqual((self.folder / 'kurumi.json').read_bytes(), before)
             self.assertEqual(self.pet.fx.stop_loss(), 98.5)
+            self.assertEqual(dialog.findChild(QSlider, 'sound_volume').value(), 30)
+            self.assertEqual(self.pet.audio.volume, .3)
         def cancel(dialog):
             reset(dialog)
             dialog.reject()
@@ -446,6 +611,7 @@ class SettingsIntegrationTests(unittest.TestCase):
         self.assertEqual(saved['okx']['position_stop_loss_percent'], 3.)
         self.assertEqual(saved['okx']['daily_loss_percent'], 3.)
         self.assertEqual(saved['okx']['inst_id'], 'IRYS-USDT-SWAP')
+        self.assertEqual(saved['sound']['volume'], .3)
         self.assertEqual(self.key_path.read_bytes(), self.key_bytes)
         self.assertIsNone(self.pet.fx.stop_loss())
 
@@ -468,6 +634,60 @@ class SettingsIntegrationTests(unittest.TestCase):
         monitor.on_okx_result(generation, Snapshot(82800.))
         self.assertFalse(monitor.engine.history)
         self.assertIsNone(monitor.stop_loss())
+        self.assertEqual(self.key_path.read_bytes(), self.key_bytes)
+
+    def test_switch_to_xperp_saves_full_id_rewarms_and_rejects_old_quote(self):
+        monitor = self.start_fake_monitor()
+        previous_generation = monitor.generation
+        started = monitor.engine.started
+        symbol = 'IRYS-USD_UM_XPERP-310530'
+        def edit(dialog):
+            selector = dialog.findChild(InstrumentSelector)
+            with patch.object(selector, 'load'):
+                selector.market.setCurrentIndex(selector.market.findData('FUTURES'))
+            selector.instrument.setEditText(symbol.lower())
+            with patch('fx_monitor.QTimer.singleShot'):
+                dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save).click()
+        self.open_settings(edit)
+        monitor.timer.stop()
+        monitor.account_timer.stop()
+        monitor.rest_timer.stop()
+        self.assertEqual(self.warnings, [])
+        self.assertEqual(self.pet.config.okx['inst_id'], symbol)
+        self.assertEqual(self.pet.config.okx['inst_type'], 'FUTURES')
+        self.assertFalse(monitor.engine.history)
+        self.assertEqual(monitor.engine.started, started)
+        monitor.on_okx_result(previous_generation, Snapshot(82800.))
+        self.assertFalse(monitor.engine.history)
+        monitor.on_okx_result(monitor.generation, Snapshot(1.23))
+        self.assertEqual(len(monitor.engine.history), 1)
+        self.assertEqual(monitor.engine.history[0][1], 1.23)
+        self.assertIsNone(monitor.engine.percent)
+        saved = json.loads((self.folder / 'kurumi.json').read_text(encoding='utf-8'))
+        self.assertEqual((saved['okx']['inst_id'], saved['okx']['inst_type']), (symbol, 'FUTURES'))
+        self.assertEqual(self.key_path.read_bytes(), self.key_bytes)
+
+    def test_legacy_xperp_without_type_loads_and_unchanged_save_keeps_window(self):
+        path = self.folder / 'kurumi.json'
+        data = json.loads(path.read_text(encoding='utf-8'))
+        symbol = 'IRYS-USD_UM_XPERP-310530'
+        data['okx']['inst_id'] = symbol
+        data['okx'].pop('inst_type')
+        path.write_text(json.dumps(data), encoding='utf-8')
+        before = path.read_bytes()
+        self.pet.config = load_config(self.folder, ROOT)
+        self.assertEqual(path.read_bytes(), before)
+        monitor = self.start_fake_monitor()
+        engine, history = monitor.engine, list(monitor.engine.history)
+        def edit(dialog):
+            selector = dialog.findChild(InstrumentSelector)
+            self.assertEqual(selector.selection(), (symbol, 'FUTURES'))
+            dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save).click()
+        self.open_settings(edit)
+        self.assertEqual(self.warnings, [])
+        self.assertIs(monitor.engine, engine)
+        self.assertEqual(list(engine.history), history)
+        self.assertEqual(self.pet.config.okx['inst_id'], symbol)
         self.assertEqual(self.key_path.read_bytes(), self.key_bytes)
 
     def test_ocr_mode_sensitivity_keeps_ocr_window_and_does_not_change_inst_id(self):

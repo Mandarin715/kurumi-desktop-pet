@@ -1,6 +1,7 @@
 """Small Windows MP3 player; one sound at a time, no extra codec bundle."""
 import ctypes
 import logging
+import math
 from pathlib import Path
 import random
 import sys
@@ -14,6 +15,13 @@ SOUND_GROUPS = {
 SOUND_NAMES = tuple(name for group in SOUND_GROUPS.values() for name in group)
 UP_POSES = frozenset((1, 2, 5))
 DOWN_POSES = frozenset((3, 7, 8, 9, 11, 13, 14))
+DEFAULT_VOLUME = .3
+
+
+def validated_volume(value):
+    if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
+        raise ValueError('音量必须在 0～1 之间')
+    return float(value)
 
 
 def sound_candidates(name, external, bundled):
@@ -62,6 +70,11 @@ class WindowsMP3Player:
             self.close()
         return ok
 
+    def set_volume(self, volume):
+        if self.opened:
+            return self.command(f'setaudio {self.alias} volume to {round(volume*1000)}')[0]
+        return True
+
     def duration(self, path):
         """Decode headers without playing audio, for packaged-asset validation."""
         if not self.open(path):
@@ -77,13 +90,19 @@ class WindowsMP3Player:
 
 
 class PetAudio:
-    def __init__(self, external, bundled, settings, volume=.6, player=None):
+    def __init__(self, external, bundled, settings, volume=DEFAULT_VOLUME, player=None):
         self.external, self.bundled, self.settings = external, bundled, settings
-        self.volume = volume
+        self.volume = validated_volume(volume)
         self.muted = settings.value('sound/muted', False, type=bool)
         self.async_mode = player is None
         self.player = player if player is not None else AsyncMP3Player()
         self.warned = set()
+
+    def set_volume(self, volume):
+        self.volume = validated_volume(volume)
+        # Does not toggle mute or start a sound; the backend also updates an
+        # already playing clip, or a decoder that is still opening a file.
+        self.player.set_volume(self.volume)
 
     def set_muted(self, muted):
         self.muted = bool(muted)
@@ -143,6 +162,8 @@ class AsyncMP3Player:
         self.factory = factory
         self.condition = threading.Condition()
         self.pending = None
+        self.latest_volume = None
+        self.volume_dirty = False
         self.generation = 0
         self.closed = False
         self.thread = None
@@ -162,6 +183,7 @@ class AsyncMP3Player:
             else:
                 previous, accepted = self.pending, True
                 self.generation += 1
+                self.latest_volume = volume
                 self.pending = (self.generation, tuple(paths), volume, callback)
                 if self.thread is None:
                     self.thread = threading.Thread(target=self._run, name='KurumiAudio', daemon=True)
@@ -172,6 +194,15 @@ class AsyncMP3Player:
         if not accepted:
             self.report(callback, False, 'closed')
         return accepted
+
+    def set_volume(self, volume):
+        volume = validated_volume(volume)
+        with self.condition:
+            if self.closed:
+                return
+            self.latest_volume = volume
+            self.volume_dirty = True
+            self.condition.notify()
 
     def close(self):
         # A queued stop also invalidates an in-flight decoder open before playback.
@@ -199,12 +230,19 @@ class AsyncMP3Player:
         try:
             while True:
                 with self.condition:
-                    while self.pending is None and not self.closed:
+                    while self.pending is None and not self.volume_dirty and not self.closed:
                         self.condition.wait()
                     if self.closed:
                         return
-                    generation, paths, volume, callback = self.pending
+                    request = self.pending
                     self.pending = None
+                    volume = self.latest_volume
+                    self.volume_dirty = False
+                if request is None:
+                    if current is not None:
+                        current.set_volume(volume)
+                    continue
+                generation, paths, _, callback = request
                 status = 'failed'
                 if current is not None:
                     current.command(f'stop {current.alias}')
@@ -224,6 +262,7 @@ class AsyncMP3Player:
                         players[path] = player
                     with self.condition:
                         cancelled = self.closed or generation != self.generation
+                        volume = self.latest_volume
                     if cancelled:
                         status = 'cancelled'
                         break

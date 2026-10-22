@@ -6,6 +6,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from fx_logic import validated_policy
 from okx_api import validate_options
+from pet_audio import DEFAULT_VOLUME, validated_volume
 
 
 @dataclass
@@ -14,7 +15,7 @@ class PetConfig:
     duration: int
     lines: dict[int, list[str]]
     fx: dict
-    volume: float = .6
+    volume: float = DEFAULT_VOLUME
     data_source: str = 'ocr'
     okx: dict = field(default_factory=validate_options)
     config_path: Path | None = field(default=None, repr=False)
@@ -46,10 +47,10 @@ def load_config(external: Path, bundled: Path) -> PetConfig:
                 logging.warning('FX 配置无效，使用默认规则：%s', error)
                 policy = validated_policy()
             sound = data.get('sound', {})
-            volume = sound.get('volume', .6) if isinstance(sound, dict) else None
+            volume = sound.get('volume', DEFAULT_VOLUME) if isinstance(sound, dict) else None
             if type(volume) not in (int, float) or not math.isfinite(volume) or not 0 <= volume <= 1:
-                logging.warning('音量配置无效，使用默认值 0.6（有效范围为 0～1）')
-                volume = .6
+                logging.warning('音量配置无效，使用默认值 %g（有效范围为 0～1）', DEFAULT_VOLUME)
+                volume = DEFAULT_VOLUME
             source = data.get('data_source', 'ocr')
             if source not in ('ocr', 'okx'):
                 source = 'ocr'
@@ -85,7 +86,7 @@ def atomic_json(path, data):
             temporary.unlink()
 
 
-def save_options(config, external, bundled, source, okx, fx=None):
+def save_options(config, external, bundled, source, okx, fx=None, volume=None):
     path = config.config_path
     # Bundled one-file resources are temporary/read-only; create an external copy.
     if path not in (external / 'kurumi.json', external / 'assets' / 'kurumi.json'):
@@ -96,6 +97,8 @@ def save_options(config, external, bundled, source, okx, fx=None):
         if not isinstance(data, dict) or source not in ('ocr', 'okx'):
             raise ValueError()
         options = validate_options(okx)
+        if volume is not None:
+            volume = validated_volume(volume)
         # Merge only known edited fields, retaining future/user extension keys.
         raw_okx = data.get('okx', {})
         data.update({'data_source': source,
@@ -104,9 +107,24 @@ def save_options(config, external, bundled, source, okx, fx=None):
             policy = validated_policy(fx)
             raw_fx = data.get('fx', {})
             data['fx'] = {**(raw_fx if isinstance(raw_fx, dict) else {}), **policy}
+        if volume is not None:
+            raw_sound = data.get('sound', {})
+            data['sound'] = {**(raw_sound if isinstance(raw_sound, dict) else {}), 'volume': volume}
         atomic_json(path, data)
     except (ValueError, OSError, TypeError):
         raise ValueError('无法保存 kurumi.json，请检查文件格式或目录写入权限') from None
     config.data_source, config.okx, config.config_path = source, options, path
     if fx is not None:
         config.fx = policy
+    if volume is not None:
+        config.volume = volume
+
+
+def public_default_config(template):
+    """Create fresh release/bundled defaults without editing any existing config."""
+    from okx_api import DEFAULT_OKX
+    source = json.loads(Path(template).read_text(encoding='utf-8-sig'))
+    data = {key: source[key] for key in ('default', 'duration', 'lines')}
+    data.update({'fx': validated_policy(), 'data_source': 'ocr',
+                 'sound': {'volume': DEFAULT_VOLUME}, 'okx': DEFAULT_OKX.copy()})
+    return data

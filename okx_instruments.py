@@ -6,15 +6,19 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, Signal, Slot
 from PySide6.QtWidgets import (QApplication, QComboBox, QCompleter, QFormLayout,
                               QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget)
 
-from okx_api import DEFAULT_OKX, OKXClient
+from okx_api import DEFAULT_OKX, OKXClient, XPERP_ID, instrument_type
 
 CACHE_SECONDS = 3600.
 
 
 def normalize_instrument(text, inst_type):
     value = text.strip().upper()
+    if inst_type == 'FUTURES':
+        if len(value) > 64 or not XPERP_ID.fullmatch(value):
+            raise ValueError('请输入完整 XPERP 品种，例如 IRYS-USD_UM_XPERP-310530')
+        return value
     if inst_type not in ('SPOT', 'SWAP'):
-        raise ValueError('请选择现货或永续')
+        raise ValueError('请选择现货、永续或 XPERP')
     if value.endswith('-SWAP'):
         if inst_type != 'SWAP':
             raise ValueError('现货交易对不能带 -SWAP，请切换为永续或修改交易对')
@@ -31,6 +35,10 @@ def available_instruments(rows, inst_type):
             continue
         value = row.get('instId')
         if not isinstance(value, str):
+            continue
+        # OKX groups XPERP with ordinary expiry futures. This selector exposes
+        # only the requested XPERP family, never delivery futures or options.
+        if inst_type == 'FUTURES' and '_UM_XPERP' not in value:
             continue
         try:
             if normalize_instrument(value, inst_type) == value:
@@ -122,7 +130,8 @@ class InstrumentSelector(QWidget):
         self.market.setObjectName('okx_inst_type')
         self.market.addItem('现货', 'SPOT')
         self.market.addItem('永续', 'SWAP')
-        initial = 'SWAP' if options['inst_id'].endswith('-SWAP') else 'SPOT'
+        self.market.addItem('XPERP', 'FUTURES')
+        initial = instrument_type(options['inst_id'])
         self.market.setCurrentIndex(self.market.findData(initial))
         form.addRow('市场类型', self.market)
         self.instrument = QComboBox()
@@ -156,6 +165,7 @@ class InstrumentSelector(QWidget):
         self.refresh.clicked.connect(lambda: self.load(force=True))
         self.catalog.finished.connect(self._loaded)
         self.controls.setEnabled(enabled)
+        self._update_placeholder()
         self._update_actual()
 
     @staticmethod
@@ -165,7 +175,7 @@ class InstrumentSelector(QWidget):
     def selection(self):
         # Unchanged old configurations remain valid even if not in a current list.
         text = self.instrument.currentText().strip().upper()
-        original_type = 'SWAP' if self.original['inst_id'].endswith('-SWAP') else 'SPOT'
+        original_type = instrument_type(self.original['inst_id'])
         if not self.okx_enabled or (self.market.currentData() == original_type
                                   and text == self.display_id(self.original['inst_id'])):
             return self.original['inst_id'], original_type
@@ -188,8 +198,14 @@ class InstrumentSelector(QWidget):
         self.instrument.clear()
         self.instrument.setEditText(text)
         self.instrument.blockSignals(False)
+        self._update_placeholder()
         self._update_actual()
         self.load()
+
+    def _update_placeholder(self):
+        self.instrument.lineEdit().setPlaceholderText(
+            '搜索或输入完整 XPERP，如 IRYS-USD_UM_XPERP-310530'
+            if self.market.currentData() == 'FUTURES' else '搜索或手动输入，如 BTC-USDT')
 
     def set_simulated(self, simulated):
         self.simulated = simulated

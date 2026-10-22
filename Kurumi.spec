@@ -1,16 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
+import json
 from PyInstaller.utils.hooks import collect_dynamic_libs, get_package_paths
 from pet_audio import SOUND_NAMES
+from pet_core import public_default_config
 
 root = Path(SPECPATH)
+defaults = root / 'build' / 'bundled-defaults' / 'kurumi.json'
+defaults.parent.mkdir(parents=True, exist_ok=True)
+defaults.write_text(json.dumps(public_default_config(root/'kurumi.json'), ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
 a = Analysis(
     [str(root / 'main.py')],
     pathex=[str(root)],
     binaries=collect_dynamic_libs('onnxruntime'),
     datas=[(str(root / 'assets' / f'kurumi_{i:02d}.png'), 'assets') for i in range(1, 15)]
           + [(str(root / 'assets' / 'sfx' / f'{name}.mp3'), 'assets/sfx') for name in SOUND_NAMES]
-          + [(str(root / 'kurumi.json'), '.'), (str(root / 'LICENSES.txt'), '.'),
+          + [(str(defaults), '.'), (str(root / 'LICENSES.txt'), '.'),
              (str(Path(get_package_paths('rapidocr_onnxruntime')[1]) / 'models' /
                   'ch_PP-OCRv4_rec_infer.onnx'), 'ocr_models')],
     hiddenimports=[],

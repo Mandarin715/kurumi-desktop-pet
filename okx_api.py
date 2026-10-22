@@ -22,6 +22,13 @@ GET_ROUTES = frozenset((TICKER, CONFIG, POSITIONS, BALANCE, INSTRUMENTS))
 DEFAULT_OKX = {'inst_id': 'BTC-USDT', 'inst_type': 'SPOT', 'simulated': False,
                'position_stop_loss_percent': 3., 'daily_loss_percent': 3.,
                'timeout_seconds': 5.}
+XPERP_ID = re.compile(r'[A-Z0-9]+-[A-Z0-9]+_UM_XPERP-[0-9]{6}')
+
+
+def instrument_type(inst_id):
+    if XPERP_ID.fullmatch(inst_id):
+        return 'FUTURES'
+    return 'SWAP' if inst_id.endswith('-SWAP') else 'SPOT'
 
 
 def validate_options(data=None):
@@ -33,11 +40,12 @@ def validate_options(data=None):
     if not isinstance(result['inst_id'], str):
         raise ValueError('交易对格式无效')
     result['inst_id'] = result['inst_id'].strip().upper()
-    if len(result['inst_id']) > 64 or not re.fullmatch(r'[A-Z0-9]+(?:-[A-Z0-9]+){1,5}', result['inst_id']):
+    if len(result['inst_id']) > 64 or not (XPERP_ID.fullmatch(result['inst_id'])
+            or re.fullmatch(r'[A-Z0-9]+(?:-[A-Z0-9]+){1,5}', result['inst_id'])):
         raise ValueError('交易对格式无效，例如 BTC-USDT')
     # Keep legacy IDs verbatim (apart from the established case normalization).
     # The canonical ID wins over stale/absent auxiliary market metadata.
-    result['inst_type'] = 'SWAP' if result['inst_id'].endswith('-SWAP') else 'SPOT'
+    result['inst_type'] = instrument_type(result['inst_id'])
     if type(result['simulated']) is not bool:
         raise ValueError('模拟盘设置必须为 true 或 false')
     for key in ('position_stop_loss_percent', 'daily_loss_percent', 'timeout_seconds'):
@@ -126,7 +134,7 @@ class OKXClient:
         valid_query = ((route == TICKER and isinstance(query, dict) and set(query) == {'instId'}
                         and query['instId'] == self.options['inst_id'])
                        or (route == INSTRUMENTS and isinstance(query, dict) and set(query) == {'instType'}
-                           and query['instType'] in ('SPOT', 'SWAP')))
+                           and query['instType'] in ('SPOT', 'SWAP', 'FUTURES')))
         if (query and not valid_query) or (route in PUBLIC_ROUTES and not valid_query):
             raise OKXError('不允许的参数')
         path = route + ('?' + urlencode(query) if query else '')

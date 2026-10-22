@@ -21,6 +21,7 @@ def run(report_path, external, bundled):
     # Native Windows frame margins must not undo its initial placement.
     import tempfile
     original_external, original_position = pet.external, pet.pos()
+    original_volume = pet.audio.volume
     placement_checks = []
     settings_checks = []
     area = pet.screen().availableGeometry()
@@ -34,17 +35,29 @@ def run(report_path, external, bundled):
                                          and pet.pos() == stationary
                                          and any(screen.availableGeometry().contains(dialog.frameGeometry())
                                                  for screen in QApplication.screens())))
-            from fx_settings import SensitivityControls
+            from fx_settings import SensitivityControls, VolumeControls
             from okx_instruments import InstrumentSelector
             from PySide6.QtCore import QPoint, QPointF, Qt
             from PySide6.QtGui import QWheelEvent
             from PySide6.QtWidgets import QDialogButtonBox, QDoubleSpinBox, QLineEdit, QPushButton
             controls = dialog.findChild(SensitivityControls)
+            volume = dialog.findChild(VolumeControls)
             selector = dialog.findChild(InstrumentSelector)
-            if (controls is None or selector is None
+            if (controls is None or volume is None or selector is None
                     or selector.selection()[0] != pet.config.okx['inst_id']
+                    or selector.market.findText('XPERP') < 0
+                    or selector.market.itemData(selector.market.findText('XPERP')) != 'FUTURES'
                     or selector.controls.isEnabled() != (pet.config.data_source == 'okx')):
                 raise RuntimeError('Packaged strategy/market widgets missing or changed existing instrument')
+            volume.slider.setValue(17)
+            if pet.audio.volume != .17 or not pet.audio.muted:
+                raise RuntimeError('Packaged volume preview changed mute or did not apply')
+            event = QWheelEvent(QPointF(5, 5), QPointF(volume.slider.mapToGlobal(QPoint(5, 5))),
+                                QPoint(), QPoint(0, 120), Qt.MouseButton.NoButton,
+                                Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+            QApplication.sendEvent(volume.slider, event)
+            if volume.slider.value() != 17:
+                raise RuntimeError('Packaged volume slider changed on wheel')
             controls.preset.setCurrentIndex(controls.preset.findData('custom'))
             controls.spins[0].setValue(1.)
             if dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save).isEnabled():
@@ -74,6 +87,7 @@ def run(report_path, external, bundled):
                     or dialog.findChild(QDoubleSpinBox, 'okx_position_stop_loss_percent').value() != 3.
                     or dialog.findChild(QDoubleSpinBox, 'okx_daily_loss_percent').value() != 3.
                     or dialog.findChild(QLineEdit, 'fx_stop_loss').text()
+                    or volume.slider.value() != 30 or pet.audio.volume != .3
                     or any('重新框选' in button.text() for button in dialog.findChildren(QPushButton))):
                 raise RuntimeError('Packaged restore numeric defaults failed')
             dialog.grab().save(str(report_path.with_name(report_path.stem+'-settings.png')))
@@ -100,6 +114,26 @@ def run(report_path, external, bundled):
         raise RuntimeError('Native dialog placement overlaps the pet or work area')
     if settings_checks != [True]:
         raise RuntimeError('Packaged settings controls failed validation')
+    if pet.audio.volume != original_volume:
+        raise RuntimeError('Packaged volume preview did not revert on cancel')
+    # Render the real update dialog with this release's notes, without a network
+    # check, download, skip preference, install, or any personal configuration.
+    from app_version import VERSION, RELEASE_NOTES
+    from updater import Release
+    from update_ui import UpdateDialog
+    from window_placement import place_dialog
+    preview = UpdateDialog(Release(VERSION, 'v'+VERSION, RELEASE_NOTES, '', '', 1, '0'*64),
+                           pet, current='1.1.1')
+    place_dialog(preview, pet)
+    preview.show()
+    QApplication.processEvents()
+    if (preview.frameGeometry().intersects(pet.frameGeometry()) or preview.width() > 500
+            or not preview.baidu.isVisible() or not preview.quark.isVisible()
+            or preview.notes.toPlainText() != RELEASE_NOTES):
+        raise RuntimeError('Packaged update dialog failed')
+    if not preview.grab().save(str(report_path.with_name(report_path.stem+'-update.png'))):
+        raise RuntimeError('Unable to save update preview')
+    preview.reject()
     from PySide6.QtCore import QRect
     from PySide6.QtCore import QPoint
     from fx_region import region_data
@@ -227,6 +261,25 @@ def run(report_path, external, bundled):
     if (available_instruments(client.instruments('SWAP'), 'SWAP') != ['BTC-USDT-SWAP']
             or normalize_instrument('btc-usdt-swap', 'SWAP') != 'BTC-USDT-SWAP'):
         raise RuntimeError('Packaged instrument catalog failed')
+    from okx_api import INSTRUMENTS, TICKER
+    symbol = 'IRYS-USD_UM_XPERP-310530'
+    def xperp_transport(path, headers, timeout):
+        if any('ACCESS' in key for key in headers):
+            raise RuntimeError('Public XPERP request was signed')
+        if path == INSTRUMENTS+'?instType=FUTURES':
+            return {'code': '0', 'data': [
+                {'instId': symbol, 'instType': 'FUTURES', 'state': 'live'},
+                {'instId': 'BTC-USD-261225', 'instType': 'FUTURES', 'state': 'live'},
+                {'instId': 'BTC-USD-261225-100000-C', 'instType': 'OPTION', 'state': 'live'}]}
+        if path == TICKER+'?instId='+symbol:
+            return {'code': '0', 'data': [{'instId': symbol, 'last': '1.23',
+                                          'ts': str(int(time.time()*1000))}]}
+        raise RuntimeError('Unexpected public XPERP route')
+    xperp_client = OKXClient({**DEFAULT_OKX, 'inst_id': symbol}, transport=xperp_transport)
+    if (available_instruments(xperp_client.instruments('FUTURES'), 'FUTURES') != [symbol]
+            or normalize_instrument(symbol.lower(), 'FUTURES') != symbol
+            or xperp_client.poll_ticker().price != 1.23):
+        raise RuntimeError('Packaged XPERP catalog/ticker failed')
     client.transport = lambda *args: {
         'code': '0', 'data': [{'instId': 'BTC-USDT', 'last': '123.45', 'ts': str(int(time.time()*1000))}]}
     from fx_logic import sensitivity_values
@@ -327,6 +380,8 @@ def run(report_path, external, bundled):
         handler.close()
     defaults = validated_policy()
     result = {'ok': True, 'qt': qVersion(), 'images': len(pet.images),
+              'version': VERSION, 'update_dialog': True, 'update_mirror_buttons': True,
+              'volume_live_preview': True, 'volume_cancel_restore': True, 'default_volume': .3,
               'dialogs_avoid_pet': True,
               'fx_fresh_region_each_start': True,
               'settings_wheel_ignored': True,
@@ -343,6 +398,7 @@ def run(report_path, external, bundled):
               'fx_synthetic_mood': update.mood,
               'sound_lengths_ms': sound_lengths, 'volume': pet.config.volume,
               'okx_public_fixture': True,
+              'okx_xperp_fixture': True,
               'sensitivity_hot_update': True, 'sensitivity_fresh_confirmations': True,
               'instrument_catalog_fixture': True, 'ocr_instrument_selector_disabled': True,
               'okx_failure_limit': 3, 'okx_auto_recovery': True,
