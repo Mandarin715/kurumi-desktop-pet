@@ -289,9 +289,14 @@ class FXMonitor(QObject):
             self.log_sample(context, skipped=True, reason='invalid_region')
             return
         screen, rect = resolved
-        if not self.apply_capture_policy() and self.pet.geometry().intersects(rect.translated(screen.geometry().topLeft())):
+        global_rect = rect.translated(screen.geometry().topLeft())
+        if not self.apply_capture_policy() and self.pet.occludes_price_rect(global_rect):
             self.set_status('桌宠挡住价格，请拖开')
-            self.log_sample(context, skipped=True, reason='pet_occludes_region')
+            self.log_sample(context, skipped=True, reason='pet_occludes_region',
+                            price_rect=list(global_rect.getRect()),
+                            pet_origin=[self.pet.mapToGlobal(self.pet.rect().topLeft()).x(),
+                                        self.pet.mapToGlobal(self.pet.rect().topLeft()).y()],
+                            visible_bounds=list(self.pet.capture_region().boundingRect().getRect()))
             return
         try:
             pixmap = screen.grabWindow(0, rect.x(), rect.y(), rect.width(), rect.height())

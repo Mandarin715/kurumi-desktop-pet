@@ -13,8 +13,10 @@ from unittest.mock import Mock, patch
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from PySide6.QtCore import QLocale, QObject, QSettings, QTimer, Signal
-from PySide6.QtWidgets import QApplication, QComboBox, QDialogButtonBox, QPushButton
+from PySide6.QtCore import QLocale, QObject, QPoint, QPointF, QSettings, Qt, QTimer, Signal
+from PySide6.QtGui import QWheelEvent
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QComboBox, QDialogButtonBox, QDoubleSpinBox, QLineEdit, QPushButton
 from fx_logic import (PriceMoodEngine, SENSITIVITY_PRESETS, sensitivity_name,
                       sensitivity_values, validated_policy)
 from fx_settings import SensitivityControls
@@ -385,6 +387,67 @@ class SettingsIntegrationTests(unittest.TestCase):
                          [.09, .31, 3.13])
         self.assertEqual(saved['okx']['inst_id'], 'IRYS-USDT-SWAP')
         self.assertEqual(self.key_path.read_bytes(), self.key_bytes)
+
+    def test_all_numeric_editors_ignore_wheel_even_with_focus_and_allow_keyboard(self):
+        def edit(dialog):
+            controls = dialog.findChild(SensitivityControls)
+            controls.preset.setCurrentIndex(controls.preset.findData('custom'))
+            spins = dialog.findChildren(QDoubleSpinBox)
+            self.assertEqual(len(spins), 5)
+            for spin in spins:
+                for focused in (False, True):
+                    if focused:
+                        spin.setFocus()
+                    else:
+                        spin.clearFocus()
+                    before = spin.value()
+                    for target in (spin, spin.lineEdit()):
+                        for delta in (-120, 120):
+                            event = QWheelEvent(QPointF(5, 5), QPointF(target.mapToGlobal(QPoint(5, 5))),
+                                                QPoint(), QPoint(0, delta), Qt.MouseButton.NoButton,
+                                                Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+                            self.app.sendEvent(target, event)
+                            self.assertEqual(spin.value(), before)
+                    QTest.keyClick(spin, Qt.Key.Key_Up)
+                    self.assertGreater(spin.value(), before)
+                    spin.setValue(before)
+            self.assertFalse(any('重新框选' in button.text() for button in dialog.findChildren(QPushButton)))
+            dialog.reject()
+        self.open_settings(edit)
+
+    def test_restore_numeric_defaults_changes_draft_only_until_save(self):
+        before = (self.folder / 'kurumi.json').read_bytes()
+        self.pet.settings.setValue('fx/stop_loss', '98.50')
+        def reset(dialog):
+            controls = dialog.findChild(SensitivityControls)
+            controls.preset.setCurrentIndex(controls.preset.findData('crypto'))
+            dialog.findChild(QDoubleSpinBox, 'okx_position_stop_loss_percent').setValue(1.01)
+            dialog.findChild(QDoubleSpinBox, 'okx_daily_loss_percent').setValue(2.)
+            dialog.findChild(QPushButton, 'fx_restore_numeric_defaults').click()
+            self.assertEqual(controls.policy()['sensitivity_preset'], 'default')
+            self.assertEqual(dialog.findChild(QDoubleSpinBox, 'okx_position_stop_loss_percent').value(), 3.)
+            self.assertEqual(dialog.findChild(QDoubleSpinBox, 'okx_daily_loss_percent').value(), 3.)
+            self.assertEqual(dialog.findChild(QLineEdit, 'fx_stop_loss').text(), '')
+            self.assertEqual(dialog.findChild(QComboBox, 'okx_inst_id').currentText(), 'IRYS-USDT')
+            self.assertEqual((self.folder / 'kurumi.json').read_bytes(), before)
+            self.assertEqual(self.pet.fx.stop_loss(), 98.5)
+        def cancel(dialog):
+            reset(dialog)
+            dialog.reject()
+        self.open_settings(cancel)
+        self.assertEqual((self.folder / 'kurumi.json').read_bytes(), before)
+        self.assertEqual(self.pet.fx.stop_loss(), 98.5)
+        def save(dialog):
+            reset(dialog)
+            dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save).click()
+        self.open_settings(save)
+        saved = json.loads((self.folder / 'kurumi.json').read_text(encoding='utf-8'))
+        self.assertEqual(saved['fx']['sensitivity_preset'], 'default')
+        self.assertEqual(saved['okx']['position_stop_loss_percent'], 3.)
+        self.assertEqual(saved['okx']['daily_loss_percent'], 3.)
+        self.assertEqual(saved['okx']['inst_id'], 'IRYS-USDT-SWAP')
+        self.assertEqual(self.key_path.read_bytes(), self.key_bytes)
+        self.assertIsNone(self.pet.fx.stop_loss())
 
     def test_changed_pair_writes_inst_id_rewarms_keeps_session_and_discards_old_quote(self):
         monitor = self.start_fake_monitor()

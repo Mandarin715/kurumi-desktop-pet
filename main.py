@@ -9,18 +9,18 @@ import json
 
 from PySide6.QtCore import QEvent, QEasingCurve, QPoint, QRect, QRectF, QSettings, Qt, QTimer, QVariantAnimation
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QFont, QIcon, QImage, QPainter,
-                           QPainterPath, QPen, QPixmap, QPolygonF, QRegion)
-from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
+                           QPainterPath, QPen, QPixmap, QPolygonF, QRegion, QTransform)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox, QFormLayout,
                               QLabel, QLineEdit, QMenu, QMessageBox, QPushButton,
                               QScrollArea, QSystemTrayIcon, QVBoxLayout, QWidget)
 
 from pet_core import atomic_json, image_candidates, load_config, save_options
 from fx_monitor import FXMonitor
-from fx_settings import SensitivityControls
+from fx_settings import NoWheelDoubleSpinBox, SensitivityControls
 from fx_ocr import parse_price
 from fx_region import RegionSelector, resolve_region
 from pet_audio import PetAudio
-from okx_api import Credentials, load_credentials, validate_options
+from okx_api import DEFAULT_OKX, Credentials, load_credentials, validate_options
 from okx_instruments import InstrumentSelector
 from window_placement import place_dialog
 
@@ -252,7 +252,7 @@ class PetWindow(QWidget):
 
     def toggle_fx(self, enabled):
         if enabled:
-            if self.config.data_source == 'ocr' and resolve_region(self.fx.region) is None:
+            if self.config.data_source == 'ocr':
                 self.select_price_region(start_after=True)
                 return
             self.timer.stop()
@@ -272,7 +272,7 @@ class PetWindow(QWidget):
             self.show_warning(str(error))
             return
         if self.fx.active:
-            if source == 'ocr' and resolve_region(self.fx.region) is None:
+            if source == 'ocr':
                 self.select_price_region(start_after=True)
             else:
                 self.fx.set_active(True, preserve_history=True)
@@ -315,11 +315,13 @@ class PetWindow(QWidget):
             self.selector = None
             if data is not None:
                 self.fx.set_region(data)
-            resume = start_after and (data is not None or was_active)
+            # An explicit OCR start must never fall back to yesterday's region
+            # when the user cancels the fresh selection.
+            resume = start_after and data is not None
             self.fx_action.setChecked(resume)
             if resume:
                 self.fx.set_active(True, source_override=source_override,
-                                   preserve_history=was_active and data is None)
+                                   preserve_history=False)
         self.selector = RegionSelector(selected)
 
     def fx_settings(self, load_instruments=True):
@@ -334,13 +336,13 @@ class PetWindow(QWidget):
         scroll.setWidget(body)
         outer.addWidget(scroll)
         info = QLabel('右键“行情数据源”选择截图或 OKX，选择保存在 kurumi.json。\n'
-                      f'截图模式首次框选一个价格数字，之后每 {self.config.fx["interval_ms"]/1000:g} 秒读取该区域。\n'
+                      f'截图模式每次开启 FX 都先框选一个价格数字，之后每 {self.config.fx["interval_ms"]/1000:g} 秒读取该区域。\n'
                       f'OKX 行情每 {self.config.fx["okx_interval_ms"]/1000:g} 秒读取，账户独立每 {self.config.fx["account_interval_ms"]/1000:g} 秒读取。\n'
-                      '行情窗口移动、切换品种或缩放后，请重新框选。\n'
+                      '行情窗口移动、切换品种或缩放后，请关闭再开启 FX 重新框选。\n'
                       '读不清、包含多个数字或两次 OCR 结果不同，均跳过本次。')
         info.setWordWrap(True)
         layout.addWidget(info)
-        region_label = '已保存价格区域' if resolve_region(self.fx.region) else '尚未框选 / 原区域失效'
+        region_label = '截图模式每次开启 FX 时都会重新框选价格区域'
         status_label = QLabel(region_label + '\n状态：' + self.fx.status_text)
         status_label.setWordWrap(True)
         layout.addWidget(status_label)
@@ -348,6 +350,7 @@ class PetWindow(QWidget):
         layout.addWidget(sensitivity)
         form = QFormLayout()
         stop = QLineEdit('' if self.fx.stop_loss() is None else f'{self.fx.stop_loss():.12f}'.rstrip('0').rstrip('.'))
+        stop.setObjectName('fx_stop_loss')
         stop.setPlaceholderText('留空关闭止损提醒，例如 98.50')
         form.addRow('止损价', stop)
         layout.addLayout(form)
@@ -359,8 +362,9 @@ class PetWindow(QWidget):
         simulated.setChecked(self.config.okx['simulated'])
         okx_form.addRow(simulated)
         simulated.toggled.connect(instrument.set_simulated)
-        position_loss, day_loss = QDoubleSpinBox(), QDoubleSpinBox()
+        position_loss, day_loss = NoWheelDoubleSpinBox(), NoWheelDoubleSpinBox()
         for spin, key in [(position_loss, 'position_stop_loss_percent'), (day_loss, 'daily_loss_percent')]:
+            spin.setObjectName('okx_'+key)
             spin.setRange(.01, 1000.)
             spin.setDecimals(2)
             spin.setSuffix(' %')
@@ -398,20 +402,27 @@ class PetWindow(QWidget):
                          '保持时间和两档台词仍可在 kurumi.json 的 fx 中修改，重启生效。')
         privacy.setWordWrap(True)
         layout.addWidget(privacy)
-        reselect = QPushButton('重新框选价格区域（重置当天价格基准）')
-        layout.addWidget(reselect)
+        restore_values = QPushButton('恢复数值默认')
+        restore_values.setObjectName('fx_restore_numeric_defaults')
+        restore_values.setToolTip('恢复默认灵敏度、两条 3% 账户提醒线，并清空手填止损价；保存后生效。交易对和密钥不变。')
+
+        def reset_numeric_values():
+            sensitivity.restore_default()
+            position_loss.setValue(DEFAULT_OKX['position_stop_loss_percent'])
+            day_loss.setValue(DEFAULT_OKX['daily_loss_percent'])
+            stop.clear()
+
+        restore_values.clicked.connect(reset_numeric_values)
+        layout.addWidget(restore_values)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Save).setText('保存')
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText('取消')
         outer.addWidget(buttons)
         def set_valid(valid):
             buttons.button(QDialogButtonBox.StandardButton.Save).setEnabled(valid)
-            reselect.setEnabled(valid)
         sensitivity.validity_changed.connect(set_valid)
         set_valid(sensitivity.valid)
-        pending = {'reselect': False}
-
-        def save(reselect_region=False):
+        def save():
             value = parse_price(stop.text()) if stop.text().strip() else None
             if stop.text().strip() and value is None:
                 self.show_warning('请输入一个大于 0 的价格数字，或留空关闭。', dialog)
@@ -456,22 +467,16 @@ class PetWindow(QWidget):
                 self.fx.reconfigure_okx()
             if sensitivity_changed:
                 self.fx.apply_policy(self.config.fx)
-            pending['reselect'] = reselect_region
             dialog.accept()
             if not same_instrument and self.config.data_source == 'okx':
                 QTimer.singleShot(0, lambda: self.show_warning('已切换交易品种或模拟盘状态，手填止损价已清空，请按新品种重新设置。'))
         buttons.accepted.connect(lambda: save())
         buttons.rejected.connect(dialog.reject)
-        reselect.clicked.connect(lambda: save(True))
         if load_instruments:
             QTimer.singleShot(0, instrument.load)
         place_dialog(dialog, self)
         dialog.exec()
         dialog.deleteLater()
-        if pending['reselect']:
-            active = self.fx.active
-            source = self.fx.source
-            QTimer.singleShot(0, lambda: self.select_price_region(start_after=active, source_override=source))
 
     def update_fx_status(self, status):
         self.fx_status_action.setText('FX：' + status)
@@ -553,7 +558,10 @@ class PetWindow(QWidget):
         painter = QPainter(snapshot)
         self.paint_character(painter)
         painter.end()
-        previous_region = self.character_region() if QApplication.platformName() != 'windows' else QRegion()
+        # The outgoing frame remains visible during the fade on Windows too.
+        # Keep its pixel coverage for OCR occlusion checks, without installing
+        # a binary native window mask that would make soft edges jagged.
+        previous_region = self.character_region()
         self.pose_animation.stop()
         self.previous_frame = snapshot
         self.previous_region = previous_region
@@ -623,11 +631,35 @@ class PetWindow(QWidget):
         return path.simplified()
 
     def character_region(self):
-        offset = round(6 * (1-self.transition))
-        region = self.regions[self.current].translated(0, offset)
-        if self.previous_frame is not None and self.transition < 1.:
+        region = QRegion()
+        if self.transition > .001:
+            offset = round(6 * (1-self.transition))
+            region = self.regions[self.current].translated(0, offset)
+        if self.previous_frame is not None and self.transition < .999:
             region |= self.previous_region
         return region
+
+    def capture_region(self):
+        """Visible painted coverage in logical widget coordinates, excluding empty padding."""
+        region = self.character_region()
+        if self.bubble_text and self.bubble_level > .001:
+            anchor = self.bubble_rect.center()
+            scale = .92 + .08*self.bubble_level
+            transform = QTransform()
+            transform.translate(anchor.x(), anchor.y())
+            transform.scale(scale, scale)
+            transform.translate(-anchor.x(), -anchor.y())
+            region |= QRegion(transform.map(self.bubble_path()).toFillPolygon().toPolygon())
+        return region.intersected(QRegion(self.rect()))
+
+    def occludes_price_rect(self, global_rect):
+        if not self.isVisible():
+            return False
+        # QScreen geometry and selection use logical desktop coordinates.
+        # mapFromGlobal handles negative monitor origins and window placement;
+        # multiplying either rectangle by DPR here would mix coordinate spaces.
+        local_rect = QRect(self.mapFromGlobal(global_rect.topLeft()), global_rect.size())
+        return self.capture_region().intersects(local_rect)
 
     def update_mask(self):
         if QApplication.platformName() == 'windows':

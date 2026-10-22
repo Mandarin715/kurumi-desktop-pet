@@ -8,7 +8,14 @@ from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayo
 from fx_logic import SENSITIVITY_PRESETS, sensitivity_name, sensitivity_values, validated_policy
 
 
-class PercentSpinBox(QDoubleSpinBox):
+class NoWheelDoubleSpinBox(QDoubleSpinBox):
+    def wheelEvent(self, event):
+        # Let the surrounding settings panel scroll without changing a value,
+        # including when the editor already has keyboard focus.
+        event.ignore()
+
+
+class PercentSpinBox(NoWheelDoubleSpinBox):
     def textFromValue(self, value):
         text = super().textFromValue(value)
         decimal = self.locale().decimalPoint()

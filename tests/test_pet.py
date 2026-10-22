@@ -118,10 +118,12 @@ class PetTests(unittest.TestCase):
             monitor.notice.disconnect(notices.append)
 
     def test_active_menu_source_switch_rewarms_without_false_expression_or_sound(self):
-        from PySide6.QtCore import QTimer
+        from PySide6.QtCore import QRect, QTimer
+        from fx_region import region_data
         from okx_api import Snapshot
         monitor = self.pet.fx
-        with patch.object(QTimer, 'singleShot'), patch('main.resolve_region', return_value=object()):
+        monitor.set_region(region_data(self.app.primaryScreen(), QRect(10, 10, 100, 30)))
+        with patch.object(QTimer, 'singleShot'), patch('main.RegionSelector') as selector:
             monitor.set_active(True, source_override='okx')
             with patch.object(self.pet.audio, 'play') as play, \
                     patch('fx_monitor.time.monotonic', return_value=130.):
@@ -130,6 +132,9 @@ class PetTests(unittest.TestCase):
                     for t in range(0, 121, 5):
                         engine.receive(82800. if source == 'ocr' else 150., float(t))
                     self.pet.select_source(source)
+                    if source == 'ocr':
+                        self.assertFalse(monitor.active)
+                        selector.call_args.args[0](monitor.region)
                     self.assertEqual(monitor.source, source)
                     self.assertIsNot(monitor.engine, engine)
                     self.assertEqual(list(monitor.engine.history), [])
@@ -370,7 +375,7 @@ class PetTests(unittest.TestCase):
             finally:
                 monitor.set_active(False)
 
-    def test_first_enable_selects_and_reuses_saved_region(self):
+    def test_every_ocr_enable_selects_again_even_with_saved_region(self):
         from PySide6.QtCore import QRect, QTimer
         from fx_region import region_data
         monitor = self.pet.fx
@@ -388,9 +393,30 @@ class PetTests(unittest.TestCase):
             self.pet.toggle_fx(False)
             self.assertIn('没有读到', self.pet.text)
             self.pet.toggle_fx(True)
-            self.assertEqual(selector.call_count, 1)
+            self.assertEqual(selector.call_count, 2)
+            self.assertFalse(monitor.active)
+            selector.call_args.args[0](data)
             self.assertTrue(monitor.active)
+            self.assertEqual(list(monitor.engine.history), [])
             monitor.set_active(False)
+        monitor.region = old_region
+
+    def test_cancel_ocr_start_never_reuses_saved_region(self):
+        from PySide6.QtCore import QRect, QTimer
+        from fx_region import region_data
+        monitor = self.pet.fx
+        old_region = monitor.region
+        data = region_data(self.app.primaryScreen(), QRect(10, 10, 100, 30))
+        monitor.set_region(data)
+        with patch('main.RegionSelector') as selector, patch.object(QTimer, 'singleShot'):
+            self.pet.fx_action.setChecked(True)
+            self.pet.toggle_fx(True)
+            self.assertFalse(monitor.active)
+            selector.call_args.args[0](None)
+            self.assertFalse(monitor.active)
+            self.assertFalse(self.pet.fx_action.isChecked())
+            self.assertIsNone(self.pet.selector)
+            self.assertEqual(monitor.region, data)
         monitor.region = old_region
 
     def test_region_selection_drag_and_escape(self):
@@ -416,7 +442,7 @@ class PetTests(unittest.TestCase):
             dialog = QApplication.activeModalWidget()
             observations.append(isinstance(dialog, QDialog))
             observations.append(any('不保存、不上传' in label.text() for label in dialog.findChildren(QLabel)))
-            dialog.findChild(QLineEdit).setText('98.50')
+            dialog.findChild(QLineEdit, 'fx_stop_loss').setText('98.50')
             dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save).click()
         QTimer.singleShot(50, fill)
         self.pet.fx_settings()

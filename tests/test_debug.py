@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from PySide6.QtCore import QRect, QSettings, QTimer
+from PySide6.QtCore import QPoint, QRect, QSettings, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
 from fx_debug import LOGGER
@@ -120,6 +120,7 @@ class DebugTests(unittest.TestCase):
 
     def test_capture_visible_pet_still_skips_occluded_price_without_exclusion(self):
         self.monitor.policy['exclude_from_capture'] = False
+        self.pet.show()
         rect = self.pet.geometry()
         screen = Mock()
         screen.geometry.return_value = QRect(0, 0, 3000, 2000)
@@ -129,6 +130,92 @@ class DebugTests(unittest.TestCase):
             affinity.assert_called_once_with(0)
             screen.grabWindow.assert_not_called()
         self.assertEqual(self.records('sample')[-1]['reason'], 'pet_occludes_region')
+
+    def capture_synthetic_rect(self, global_rect, origin=QPoint(), dpr=1.25):
+        self.monitor.policy['exclude_from_capture'] = False
+        screen = Mock()
+        screen.geometry.return_value = QRect(origin.x(), origin.y(), 3000, 2000)
+        screen.devicePixelRatio.return_value = dpr
+        screen.grabWindow.return_value = QPixmap()  # No screen pixels are captured.
+        local_rect = global_rect.translated(-origin)
+        with patch('fx_monitor.resolve_region', return_value=(screen, local_rect)), \
+                patch.object(self.monitor, 'capture_affinity', return_value=True):
+            self.monitor.capture()
+        return screen
+
+    def test_transparent_window_padding_and_png_corner_do_not_block_capture(self):
+        self.pet.show()
+        self.pet.move(200, 200)
+        padding = QRect(self.pet.mapToGlobal(QPoint(20, 15)), QRect(0, 0, 80, 20).size())
+        self.assertTrue(self.pet.geometry().intersects(padding))
+        screen = self.capture_synthetic_rect(padding)
+        screen.grabWindow.assert_called_once()
+        self.assertNotIn('挡住', self.monitor.status_text)
+        coverage = self.pet.capture_region()
+        image_rect = self.pet.image_rects[self.pet.current]
+        corner = next(QRect(x, y, 8, 8)
+                      for y in range(image_rect.top(), image_rect.bottom()-7, 8)
+                      for x in range(image_rect.left(), image_rect.right()-7, 8)
+                      if not coverage.intersects(QRect(x, y, 8, 8)))
+        screen = self.capture_synthetic_rect(QRect(self.pet.mapToGlobal(corner.topLeft()), corner.size()))
+        screen.grabWindow.assert_called_once()
+
+    def test_far_price_and_negative_monitor_origin_use_logical_coordinates(self):
+        self.pet.show()
+        self.pet.move(1387, 595)
+        screen = self.capture_synthetic_rect(QRect(149, 307, 408, 108))
+        screen.grabWindow.assert_called_once_with(0, 149, 307, 408, 108)
+        self.assertNotIn('挡住', self.monitor.status_text)
+        self.pet.move(-1200, 200)
+        for dpr in (1., 1.25, 1.5, 2.):
+            with self.subTest(dpr=dpr):
+                screen = self.capture_synthetic_rect(QRect(-100, 40, 100, 30), QPoint(-1920, 0), dpr)
+                screen.grabWindow.assert_called_once_with(0, 1820, 40, 100, 30)
+                # Real painted pixels on the negative-origin screen still block.
+                region = self.pet.capture_region()
+                point = next(QPoint(x, y) for y in range(self.pet.height()) for x in range(self.pet.width())
+                             if region.contains(QPoint(x, y)))
+                covered = QRect(self.pet.mapToGlobal(point), QRect(0, 0, 12, 10).size())
+                screen = self.capture_synthetic_rect(covered, QPoint(-1920, 0), dpr)
+                screen.grabWindow.assert_not_called()
+                self.assertEqual(self.records('sample')[-1]['reason'], 'pet_occludes_region')
+
+    def test_bubble_and_outgoing_fade_are_visible_but_hidden_pet_is_not(self):
+        self.pet.show()
+        self.pet.move(200, 200)
+        self.pet.show_dialogue('测试气泡')
+        self.pet.bubble_animation.stop()
+        self.pet.bubble_level = 1.
+        point = self.pet.bubble_rect.center().toPoint()
+        rect = QRect(self.pet.mapToGlobal(point), QRect(0, 0, 12, 10).size())
+        self.capture_synthetic_rect(rect).grabWindow.assert_not_called()
+        self.pet.bubble_level = 0.
+        self.capture_synthetic_rect(rect).grabWindow.assert_called_once()
+        self.pet.current = 1
+        self.pet.start_pose(10)
+        self.pet.pose_animation.stop()
+        self.pet.transition = .5
+        outgoing_only = self.pet.previous_region.subtracted(self.pet.regions[10].translated(0, 3))
+        self.assertFalse(outgoing_only.isEmpty())
+        point = next(QPoint(x, y) for y in range(self.pet.height()) for x in range(self.pet.width())
+                     if outgoing_only.contains(QPoint(x, y)))
+        rect = QRect(self.pet.mapToGlobal(point), QRect(0, 0, 1, 1).size())
+        self.assertTrue(self.pet.occludes_price_rect(rect))
+        self.pet.hide()
+        self.assertFalse(self.pet.occludes_price_rect(rect))
+
+    def test_moving_pet_away_clears_a_previous_occlusion_status(self):
+        self.pet.show()
+        self.pet.move(200, 200)
+        target = self.pet.geometry()
+        self.capture_synthetic_rect(target).grabWindow.assert_not_called()
+        self.assertIn('挡住', self.monitor.status_text)
+        row = self.records('sample')[-1]
+        self.assertEqual(row['price_rect'], list(target.getRect()))
+        self.assertEqual(row['pet_origin'], [200, 200])
+        self.pet.move(1000, 700)
+        self.capture_synthetic_rect(target).grabWindow.assert_called_once()
+        self.assertNotIn('挡住', self.monitor.status_text)
 
     def test_capture_errors_and_empty_image_are_logged(self):
         screen = Mock()

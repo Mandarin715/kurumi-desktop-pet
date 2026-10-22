@@ -36,7 +36,9 @@ def run(report_path, external, bundled):
                                                  for screen in QApplication.screens())))
             from fx_settings import SensitivityControls
             from okx_instruments import InstrumentSelector
-            from PySide6.QtWidgets import QDialogButtonBox
+            from PySide6.QtCore import QPoint, QPointF, Qt
+            from PySide6.QtGui import QWheelEvent
+            from PySide6.QtWidgets import QDialogButtonBox, QDoubleSpinBox, QLineEdit, QPushButton
             controls = dialog.findChild(SensitivityControls)
             selector = dialog.findChild(InstrumentSelector)
             if (controls is None or selector is None
@@ -50,6 +52,30 @@ def run(report_path, external, bundled):
             controls.restore_default()
             if not controls.valid:
                 raise RuntimeError('Packaged restore sensitivity failed')
+            controls.preset.setCurrentIndex(controls.preset.findData('custom'))
+            spins = dialog.findChildren(QDoubleSpinBox)
+            if len(spins) != 5:
+                raise RuntimeError('Packaged numeric controls missing')
+            for spin in spins:
+                spin.setFocus()
+                before = spin.value()
+                for target in (spin, spin.lineEdit()):
+                    event = QWheelEvent(QPointF(5, 5), QPointF(target.mapToGlobal(QPoint(5, 5))),
+                                        QPoint(), QPoint(0, 120), Qt.MouseButton.NoButton,
+                                        Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+                    QApplication.sendEvent(target, event)
+                    if spin.value() != before:
+                        raise RuntimeError('Packaged numeric wheel changed a setting')
+            dialog.findChild(QDoubleSpinBox, 'okx_position_stop_loss_percent').setValue(1.01)
+            dialog.findChild(QDoubleSpinBox, 'okx_daily_loss_percent').setValue(2.)
+            dialog.findChild(QLineEdit, 'fx_stop_loss').setText('98.5')
+            dialog.findChild(QPushButton, 'fx_restore_numeric_defaults').click()
+            if (controls.policy()['sensitivity_preset'] != 'default'
+                    or dialog.findChild(QDoubleSpinBox, 'okx_position_stop_loss_percent').value() != 3.
+                    or dialog.findChild(QDoubleSpinBox, 'okx_daily_loss_percent').value() != 3.
+                    or dialog.findChild(QLineEdit, 'fx_stop_loss').text()
+                    or any('重新框选' in button.text() for button in dialog.findChildren(QPushButton))):
+                raise RuntimeError('Packaged restore numeric defaults failed')
             dialog.grab().save(str(report_path.with_name(report_path.stem+'-settings.png')))
             settings_checks.append(True)
         except Exception:
@@ -74,6 +100,35 @@ def run(report_path, external, bundled):
         raise RuntimeError('Native dialog placement overlaps the pet or work area')
     if settings_checks != [True]:
         raise RuntimeError('Packaged settings controls failed validation')
+    from PySide6.QtCore import QRect
+    from PySide6.QtCore import QPoint
+    from fx_region import region_data
+    # Match the native logical/global mapping at the current display's DPR.
+    # No desktop image is captured: only our own painted coverage is checked.
+    blank = QRect(pet.mapToGlobal(QPoint(20, 10)), QRect(0, 0, 60, 20).size())
+    if pet.occludes_price_rect(blank):
+        raise RuntimeError('Packaged transparent padding falsely blocks OCR')
+    painted = QRect(pet.mapToGlobal(pet.IMAGE_BOX.topLeft()), pet.IMAGE_BOX.size())
+    if not pet.occludes_price_rect(painted):
+        raise RuntimeError('Packaged visible character fails OCR occlusion check')
+    if pet.occludes_price_rect(painted.translated(pet.width()+1000, 0)):
+        raise RuntimeError('Packaged distant price falsely blocks OCR')
+    original_source, original_region = pet.config.data_source, pet.fx.region
+    try:
+        pet.config.data_source = 'ocr'
+        pet.fx.region = region_data(pet.screen(), QRect(10, 10, 100, 30))
+        for _ in range(2):
+            pet.toggle_fx(True)
+            QApplication.processEvents()
+            if pet.selector is None or pet.fx.active or not any(overlay.isVisible() for overlay in pet.selector.overlays):
+                raise RuntimeError('Packaged OCR start did not request a new region')
+            pet.selector.finish(None)
+            if pet.fx.active or pet.fx_action.isChecked():
+                raise RuntimeError('Packaged OCR cancel reused a previous region')
+    finally:
+        if pet.selector:
+            pet.selector.finish(None)
+        pet.config.data_source, pet.fx.region = original_source, original_region
     if not QFontMetrics(pet.font).inFontUcs4(ord('久')):
         raise RuntimeError('Chinese font unavailable')
     for _ in range(50):
@@ -273,6 +328,10 @@ def run(report_path, external, bundled):
     defaults = validated_policy()
     result = {'ok': True, 'qt': qVersion(), 'images': len(pet.images),
               'dialogs_avoid_pet': True,
+              'fx_fresh_region_each_start': True,
+              'settings_wheel_ignored': True,
+              'settings_numeric_defaults': True,
+              'fx_visible_pixel_occlusion': True,
               'default': pet.config.default, 'duration': pet.config.duration,
               'dpr': ratio, 'source_pixels': pet.images[10].width(),
               'fx_interval': pet.fx.timer.interval(), 'fx_synthetic_price': results[0][0],
